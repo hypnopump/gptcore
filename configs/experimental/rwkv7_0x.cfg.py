@@ -20,7 +20,7 @@ TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
 LOG_PROJECT = 'gptcore'
-LOG_NAME = 'RWKV6.0x L12D768H12CM3Adam'
+LOG_NAME = 'RWKV7.0x L12D768H12CM3Adam'
 
 cli.Config(
     seed_everything = 1337,
