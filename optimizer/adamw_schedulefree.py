@@ -8,8 +8,6 @@
 import torch
 import torch.optim
 import math
-import lightning
-from functools import wraps
 
 
 class AdamWScheduleFree(torch.optim.Optimizer):
