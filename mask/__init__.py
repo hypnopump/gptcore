@@ -92,24 +92,47 @@ class CausalBiasMask(nn.Module, IBiasMask):
     def forward(self, q:Tensor):
         return CausalBiasMask.cache.mask
 
-def alibi_mask(T, H):
-    bias = (torch.arange(T)[None, :] - torch.arange(T)[:, None]).float() # (T, T)
-    bias = bias + causal_bias_mask(T) # (T, T)
-    bias = bias.expand(H, -1, -1) # (H, T, T)
-    head_bias_slopes = (2 ** torch.linspace(-8.0/H, -8.0, H)).unsqueeze(-1).unsqueeze(-1) # (H, 1, 1)
-    bias = bias * head_bias_slopes # (H, T, T)
+def alibi_mask(T: int, H: int, idxs: Tensor | None = None) -> Tensor:
+    if idxs is None:
+        idxs = torch.arange(T)[None]
+    bias = (idxs[:, None, :] - idxs[:, :, None]).float()  # (B, T, T)
+    bias = bias + causal_bias_mask(T)  # (B, T, T)
+    bias = bias.expand(H, -1, -1)  # (B, H, T, T)
+    head_bias_slopes = (2 ** torch.linspace(-8.0/H, -8.0, H))[None, :, None, None]  # (B, H, 1, 1)
+    bias = bias * head_bias_slopes  # (B, H, T, T)
     return bias
 
 class AlibiMask(nn.Module, IBiasMask):
     # using first instance as a cache so we don't waste memory by duplicating our registered buffers per layer
     cache = None
-    def __init__(self, block_size : int, n_heads : int, layer_id : int):
+    def __init__(self, block_size : int, n_heads : int, layer_id : int, use_cache: bool = True):
         super().__init__()
+        self.use_cache = use_cache
+        self.h = n_heads
         if AlibiMask.cache is None:
             AlibiMask.cache = self
             T = block_size
             H = n_heads
             self.register_buffer('mask', alibi_mask(T, H))
 
-    def forward(self, q:Tensor):
-        return AlibiMask.cache.mask[:, :q.size(-2), :q.size(-2)]
+    def forward(self, q: Tensor, idxs: Tensor | None = None):
+        if self.use_cache and idxs is None:
+            return AlibiMask.cache.mask[:, :, :q.size(-2), :q.size(-2)]
+        elif idxs is not None:
+            if self.use_cache is False:
+                NotImplementedError("idxs is not None and use_cache is False. Gen mask using idxs? then select mask")
+            else:
+                b, l = q.size(0), q.size(-2)
+                _, h, t1, t2 = AlibiMask.cache.mask.shape
+                mask = AlibiMask.cache.mask
+
+            # select only positions of mask that are in idxs
+            bmask = mask.repeat(b, 1, 1, 1)
+            idx_mask = mask.new_zeros(b, t1, dtype=torch.bool)
+            idx_mask.scatter_(1, idxs, True)
+
+            i_idx_mask = idx_mask[:, None, :].repeat(1, h, 1)
+            j_idx_mask = idx_mask[:, None, None, :].repeat(1, h, l, 1)
+
+            # (B, H, I, J) -> (B, H, T1, J) -> (B, H, T1, T2)
+            return bmask[i_idx_mask].reshape(b, h, l, -1)[j_idx_mask].reshape(b, h, l, l)

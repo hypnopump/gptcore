@@ -65,7 +65,9 @@ class RotaryEmbedding(nn.Module, posemb.interface.IQueryKeyEmbedding):
             self.register_buffer('cos', cos, persistent=False)
             RotaryEmbedding.cache = self
 
-    def forward(self, x : Tuple[Tensor, Tensor]):
+    def forward(self, x : Tuple[Tensor, Tensor], idxs: Tensor | None = None):
+        if idxs is None:
+            raise NotImplementedError("idxs is only required if MoD or so, but not yet supported for this")
         q, k = x
         cache = RotaryEmbedding.cache
         # annoyingly, we have to cast to x.dtype here because AMP doesn't work during __init__ leaving our buffers as float32's
@@ -89,7 +91,9 @@ class XPosEmbedding(nn.Module, posemb.interface.IQueryKeyEmbedding):
         scale = scale.repeat_interleave(2, -1) # (T, E)
         self.register_buffer('scale', scale, persistent=False) # (T, E)
 
-    def forward(self, x : Tuple[Tensor, Tensor]):
+    def forward(self, x : Tuple[Tensor, Tensor], idxs: Tensor | None = None):
+        if idxs is None:
+            raise NotImplementedError("idxs is only required if MoD or so, but not yet supported for this")
         q, k = self.rotary(x)
         # annoyingly, we have to cast to x.dtype here because AMP doesn't work during __init__ leaving our buffers as float32's
         return q * self.scale.to(q.dtype), k / self.scale.to(k.dtype)

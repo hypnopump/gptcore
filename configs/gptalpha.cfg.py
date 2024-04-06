@@ -39,7 +39,14 @@ cli.Config(
 
             d_v_ratio=1,
         ),
-        layer_factory=lambda: model.core.TransformerLayer(
+        # layer_factory=lambda: model.core.TransformerLayer(
+        #     self_attention_sublayer_factory = lambda: model.core.AttentionSubLayer(
+        #         attention_factory = lambda:model.core.TorchAttention(bias_mask_factory=lambda **kwargs: mask.AlibiMask(**kwargs)),
+        #     ),
+        #     feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
+        # ),
+        layer_factory=lambda: model.core.MoDBlock(
+            # capacity=0.3,
             self_attention_sublayer_factory = lambda: model.core.AttentionSubLayer(
                 attention_factory = lambda:model.core.TorchAttention(bias_mask_factory=lambda **kwargs: mask.AlibiMask(**kwargs)),
             ),
@@ -68,7 +75,7 @@ cli.Config(
             ],
         ),
         datamodule_factory=lambda: dataset.DM(
-            dataset_path='dataset/pile.py', 
+            dataset_path='dataset/pile.py',
             tokenizer_factory=TOKENIZER_FACTORY, 
             batch_size=BATCH_SIZE, 
             sequence_length=MAX_SEQUENCE_LENGTH, 

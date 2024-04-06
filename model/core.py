@@ -3,6 +3,7 @@
 import abc
 
 from util.config import Factory
+import inspect
 
 from typing import Callable, Any, Optional, Tuple, List, Iterable
 from collections import OrderedDict
@@ -21,6 +22,7 @@ import model.interface
 import posemb.interface
 
 from model.hparams import HParams
+from functools import wraps
 
 #import torch._dynamo
 
@@ -71,8 +73,8 @@ class TorchAttention(TransformerLayerPart, IAttention):
         super().__init__()
         self.bias_mask = None if bias_mask_factory is None else bias_mask_factory(self.hparams.max_sequence_length, self.hparams.n_head, self.layer_id)
 
-    def forward(self, q:Tensor, k:Tensor, v:Tensor, recurrent_memory : Optional[Tensor] = None):
-        bias_mask = self.bias_mask(q) if self.bias_mask is not None else None
+    def forward(self, q:Tensor, k:Tensor, v:Tensor, recurrent_memory : Optional[Tensor] = None, idxs: Tensor | None = None):
+        bias_mask = self.bias_mask(q, idxs=idxs) if self.bias_mask is not None else None
 
         return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bias_mask, dropout_p=self.hparams.dropout, is_causal=bias_mask is None)
 
@@ -208,7 +210,7 @@ class AttentionSubLayer(TransformerLayerPart, model.interface.IAttentionSubLayer
         self.time_mixer_k = time_mixer_factory()
         self.time_mixer_v = time_mixer_factory()
 
-    def forward(self, xq : Tensor, xk : Tensor, xv : Tensor, recurrent_memory : Optional[Tensor] = None):
+    def forward(self, xq : Tensor, xk : Tensor, xv : Tensor, recurrent_memory: Tensor | None = None, idxs: Tensor | None = None):
         hparams = self.hparams
         B, T, D = xq.size() # batch size, sequence length, token embedding dimension count
         H = hparams.n_head
@@ -238,7 +240,8 @@ class AttentionSubLayer(TransformerLayerPart, model.interface.IAttentionSubLayer
         v = self.v_norm(v)
 
         # rotate queries and keys via RoPE / XPos
-        q, k = self.rotary_positional_embedding((q, k))
+        # FIXME: mask out for now as it's identity in GPTAlpha
+        # q, k = self.rotary_positional_embedding((q, k))
 
         # support for grouped-query attention
         # if there are fewer k/v heads than total heads, repeat them until the number matches
@@ -247,7 +250,7 @@ class AttentionSubLayer(TransformerLayerPart, model.interface.IAttentionSubLayer
             k = k[:,:,None,:,:].expand(B, KVH, reps, T, K).contiguous().view(B, H, T, K)
             v = v[:,:,None,:,:].expand(B, KVH, reps, T, V).contiguous().view(B, H, T, V)
 
-        y = self.attention_module(q, k, v, recurrent_memory) # (B, H, T, V)
+        y = self.attention_module(q, k, v, recurrent_memory, idxs=idxs)  # (B, H, T, V)
 
         # TransNormer style normalization after multiplying qkv (same as separate groupnorm of each head but w/o a scaling parameter)
         # normalize each head
@@ -314,9 +317,9 @@ class TransformerLayer(TransformerLayerPart):
         self.feedforward_sublayer = feedforward_sublayer_factory()
         self.feedforward_resop = residual_op_factory()
 
-    def forward(self, x : Tensor, encoder_output : Tensor | None = None, layer_recurrent_memory : Optional[Tensor] = None):
+    def forward(self, x : Tensor, encoder_output : Tensor | None = None, layer_recurrent_memory : Tensor | None = None, idxs: Tensor | None = None):
         # self attention (query, key, and value are all based on the same inputs)
-        self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory)
+        self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory, idxs=idxs)
         x = self.self_attention_resop(x, self_attn) # this code looks a little complicated, but it's just allowing us to swap out whether we add or mix the residual
 
         # optional cross attention (query is based on the current input, but key and value are based on the encoder's output)
@@ -332,88 +335,110 @@ class TransformerLayer(TransformerLayerPart):
         return x
 
 
-class MoDWrapper(TransformerLayerPart):
-    def __init__(self,
-                 self_attention_sublayer_factory : Callable[..., model.interface.IAttentionSubLayer] = Factory(AttentionSubLayer),
-                 cross_attention_sublayer_factory : Callable[..., model.interface.IAttentionSubLayer | nn.Identity] = Factory(nn.Identity),
-                 feedforward_sublayer_factory : Callable[..., model.interface.IFeedForwardSubLayer] = Factory(RWKVFeedForwardSubLayer),
-                 residual_op_factory : Callable[..., IResidualOp] = Factory(ResidualMixOp, sublayer_norm_factory = Factory(norm.RMSNorm, weight_scaling = False)),
-                 ):
+class TokenRouter(nn.Module):
+    def __init__(self, embed_dim: int):
         super().__init__()
-        self.self_attention_sublayer = self_attention_sublayer_factory()
-        self.self_attention_resop = residual_op_factory()
+        self.weight_predictor = nn.Linear(embed_dim, 1)
 
-        self.cross_attention_sublayer = cross_attention_sublayer_factory()
-        self.cross_attention_resop = residual_op_factory()
-
-        self.feedforward_sublayer = feedforward_sublayer_factory()
-        self.feedforward_resop = residual_op_factory()
-
-    def forward(self, x : Tensor, encoder_output : Tensor | None = None, layer_recurrent_memory : Optional[Tensor] = None):
-        # self attention (query, key, and value are all based on the same inputs)
-        self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory)
-        x = self.self_attention_resop(x, self_attn) # this code looks a little complicated, but it's just allowing us to swap out whether we add or mix the residual
-
-        # optional cross attention (query is based on the current input, but key and value are based on the encoder's output)
-        # NOTE - we check against nn.Identity because the normal nn.Identity module does not allow extra arguments passed, though our interface.Identity version does
-        if encoder_output is not None and not isinstance(self.cross_attention_sublayer, nn.Identity):
-            cross_attn = lambda y: self.cross_attention_sublayer(y, encoder_output, encoder_output, layer_recurrent_memory)
-            x = self.cross_attention_resop(x, cross_attn)
-
-        # feedforward network
-        feedforward = lambda y: self.feedforward_sublayer(y)
-        x = self.feedforward_resop(x, feedforward)
-
-        return x
+    def forward(self, x):
+        weights = self.weight_predictor(x).squeeze(
+            -1
+        )  # [batch_size, seq_len]
+        return weights
 
 
-from functools import wraps
+def copy_signature_from_parent(child_init: Callable, parent_class: Any) -> Callable:
+    """
+    Dynamically adjusts the child __init__ method signature to match the parent's,
+    while retaining the child __init__'s functionality including additional arguments.
+    """
+    parent_init = parent_class.__init__
+    child_init.__signature__ = inspect.signature(parent_init)
+    return child_init
 
- # @wraps(Parent.__init__)
- #    def __init__(self, *args, **kwargs):
- #        super().__init__(*args, **kwargs)
 
-class MoDWrapper(TransformerLayer, TransformerLayerPart):
-    @wraps(TransformerLayerPart.__init__)
+class MoDBlock(TransformerLayer):
+    """ Monkeypatch LayerPart and do MoD instead.
+    Copied from: https://github.com/kyegomez/Mixture-of-Depths
+    """
+    @wraps(TransformerLayer.__init__)
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.router = nn.Linear(512, 1)
+        # TODO: fix this signature issue with subclasses/factories
+        # def __init__(self, *args, capacity: float=0.3, prob: float | None = None, **kwargs):
+        super().__init__(*args,  **kwargs)
+        hparams = self.hparams
+
+        self.router = TokenRouter(hparams.d_model)
+        self.capacity = 0.5
+        self.prob = None
 
     def forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
-        batch_size, seq_len, _ = x.shape
+        # return self.loop_forward(x, encoder_output, layer_recurrent_memory)
+        return self.batch_forward(x, encoder_output, layer_recurrent_memory)
 
-        # Compute router weights for each token
-        router_weights = self.router(x).squeeze(-1)
+    def batch_forward(self, x: Tensor, encoder_output: Tensor | None = None,
+                     layer_recurrent_memory: Optional[Tensor] = None):
+        """ WARNING! This is a monkeypatched forward method; really only accepts X.
+        Exploits same num of active toks per sample to do in batched mode
+        """
+        b, s, d = x.shape
+        weights = self.router(x)
 
-        # Get the indices of the top-k tokens based on router weights
-        k = int(self.capacity * seq_len)
-        _, top_k_indices = torch.topk(router_weights, k, dim=-1)
+        # Compute B-th percentil for router weightsto determine the capacity threshold
+        k = int(self.capacity * s)
+        top_k_values, top_k_idxs = torch.topk(weights, k, dim=1, sorted=True)
+        # (B, L, K) -> (B, L)
+        # threshold = self.prob
+        # if threshold is None:
+        #     threshold = top_k_values[:, -1]
 
-        # Create a mask to select the top-k tokens
-        mask = torch.zeros_like(router_weights, dtype=torch.bool).scatter_(-1, top_k_indices, True)
+        # Determine which tokens exceed the threshold # (B, L)
+        selected_mask = x.new_zeros(b, s, dtype=torch.bool)
+        selected_mask.scatter_(1, top_k_idxs, True)
+        # selected_mask = weights > threshold.unsqueeze(-1)
 
-        # Split the input into two parts: tokens to be processed and tokens to be bypassed
-        x_process = x[mask].view(batch_size, k, -1)
-        x_bypass = x[~mask].view(batch_size, seq_len - k, -1)
+        # Process only selected tokens through the block
+        processed_tokens = torch.zeros_like(x)
+        processed_tokens[selected_mask] = (super().forward(
+            x[selected_mask].reshape(b, -1, d), idxs=top_k_idxs
+        ).reshape(-1, d) - x[selected_mask]) * weights[selected_mask].unsqueeze(-1).sigmoid()
+        processed_tokens = processed_tokens + x
 
-        # Process the selected tokens through the self-attention and feedforward sublayers
-        self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory)
-        x_process = self.self_attention_resop(x_process, self_attn)
+        return processed_tokens.contiguous()
 
-        if encoder_output is not None and not isinstance(self.cross_attention_sublayer, nn.Identity):
-            cross_attn = lambda y: self.cross_attention_sublayer(y, encoder_output, encoder_output, layer_recurrent_memory)
-            x_process = self.cross_attention_resop(x_process, cross_attn)
+    def loop_forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
+        """ WARNING! This is a monkeypatched forward method; really only accepts X. """
+        b, s, d = x.shape
+        weights = self.router(x)
 
-        feedforward = lambda y: self.feedforward_sublayer(y)
-        x_process = self.feedforward_resop(x_process, feedforward)
+        # Compute B-th percentil for router weightsto determine the capacity threshold
+        k = int(self.capacity * s)
+        top_k_values, _ = torch.topk(weights, k, dim=1, sorted=True)
+        # (B, L, K) -> (B, L)
+        threshold = self.prob
+        if threshold is None:
+            threshold = top_k_values[:, -1]
 
-        # Merge the processed and bypassed tokens back into a single tensor
-        x_merged = torch.zeros_like(x)
-        x_merged[mask] = x_process.view(-1, x.shape[-1])
-        x_merged[~mask] = x_bypass.view(-1, x.shape[-1])
+        # Determine which tokens exceed the threshold
+        selected_mask = weights > threshold.unsqueeze(-1)
 
-        return x_merged * router_weights.unsqueeze(-1)
+        # Process onlys elected tokens through the block
+        processed_tokens = torch.zeros_like(x)
+        for i in range(b):
+            # Process tokens for each block
+            selected_tokens = x[i][selected_mask[i]]
+            if selected_tokens.size(0) > 0:
+                processed_tokens[i][selected_mask[i]] = (
+                    super().forward(
+                        selected_tokens.unsqueeze(0)
+                    ).squeeze(0) - x[i][selected_mask[i]]
+                ) * weights[i][selected_mask][..., None].sigmoid()
 
+        # Combine processed tokens with unprocessed ones
+        output = processed_tokens + x
+        return output
+
+# MoDBlock.__init__ = copy_signature_from_parent(MoDBlock.__init__, TransformerLayerPart)
 
 
 
