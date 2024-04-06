@@ -11,7 +11,7 @@ import dataset.tokenizer
 import lit
 
 import model.core
-import optimizer.adamw_schedulefree
+import schedulefree
 import posemb
 import mask
 
@@ -49,7 +49,7 @@ cli.Config(
     ),
 
     trainer_factory = lambda: lit.CoreLightningTrainer(
-        optimizer_factory = lambda params: optimizer.adamw_schedulefree.AdamWScheduleFree(
+        optimizer_factory = lambda params: schedulefree.AdamWScheduleFree(
             params=params,
             lr=6e-4,
             betas=(0.9,0.999),
