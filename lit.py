@@ -252,6 +252,9 @@ class CoreLightningModel(LightningModule):
         return loss, logits, preds
 
     def training_step(self, batch, batch_idx):
+        if "ScheduleFree" in type(self.optimizers()).__name__:
+            opt = self.optimizers()
+            opt.train()
         inputs, labels = batch
         loss, logits, preds = self._get_loss_logits_preds(batch, batch_idx)
 
@@ -312,6 +315,9 @@ class CoreLightningModel(LightningModule):
                 metric.compute()
 
     def validation_step(self, batch, batch_idx):
+        if "ScheduleFree" in type(self.optimizers()).__name__:
+            opt = self.optimizers()
+            opt.eval()
         inputs, labels = batch
         loss, logits, preds = self._get_loss_logits_preds(batch, batch_idx)
         margs = metrics.MetricArgs(inputs, logits, preds, labels, loss)
