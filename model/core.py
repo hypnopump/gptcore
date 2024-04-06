@@ -332,6 +332,91 @@ class TransformerLayer(TransformerLayerPart):
         return x
 
 
+class MoDWrapper(TransformerLayerPart):
+    def __init__(self,
+                 self_attention_sublayer_factory : Callable[..., model.interface.IAttentionSubLayer] = Factory(AttentionSubLayer),
+                 cross_attention_sublayer_factory : Callable[..., model.interface.IAttentionSubLayer | nn.Identity] = Factory(nn.Identity),
+                 feedforward_sublayer_factory : Callable[..., model.interface.IFeedForwardSubLayer] = Factory(RWKVFeedForwardSubLayer),
+                 residual_op_factory : Callable[..., IResidualOp] = Factory(ResidualMixOp, sublayer_norm_factory = Factory(norm.RMSNorm, weight_scaling = False)),
+                 ):
+        super().__init__()
+        self.self_attention_sublayer = self_attention_sublayer_factory()
+        self.self_attention_resop = residual_op_factory()
+
+        self.cross_attention_sublayer = cross_attention_sublayer_factory()
+        self.cross_attention_resop = residual_op_factory()
+
+        self.feedforward_sublayer = feedforward_sublayer_factory()
+        self.feedforward_resop = residual_op_factory()
+
+    def forward(self, x : Tensor, encoder_output : Tensor | None = None, layer_recurrent_memory : Optional[Tensor] = None):
+        # self attention (query, key, and value are all based on the same inputs)
+        self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory)
+        x = self.self_attention_resop(x, self_attn) # this code looks a little complicated, but it's just allowing us to swap out whether we add or mix the residual
+
+        # optional cross attention (query is based on the current input, but key and value are based on the encoder's output)
+        # NOTE - we check against nn.Identity because the normal nn.Identity module does not allow extra arguments passed, though our interface.Identity version does
+        if encoder_output is not None and not isinstance(self.cross_attention_sublayer, nn.Identity):
+            cross_attn = lambda y: self.cross_attention_sublayer(y, encoder_output, encoder_output, layer_recurrent_memory)
+            x = self.cross_attention_resop(x, cross_attn)
+
+        # feedforward network
+        feedforward = lambda y: self.feedforward_sublayer(y)
+        x = self.feedforward_resop(x, feedforward)
+
+        return x
+
+
+from functools import wraps
+
+ # @wraps(Parent.__init__)
+ #    def __init__(self, *args, **kwargs):
+ #        super().__init__(*args, **kwargs)
+
+class MoDWrapper(TransformerLayer, TransformerLayerPart):
+    @wraps(TransformerLayerPart.__init__)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.router = nn.Linear(512, 1)
+
+    def forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
+        batch_size, seq_len, _ = x.shape
+
+        # Compute router weights for each token
+        router_weights = self.router(x).squeeze(-1)
+
+        # Get the indices of the top-k tokens based on router weights
+        k = int(self.capacity * seq_len)
+        _, top_k_indices = torch.topk(router_weights, k, dim=-1)
+
+        # Create a mask to select the top-k tokens
+        mask = torch.zeros_like(router_weights, dtype=torch.bool).scatter_(-1, top_k_indices, True)
+
+        # Split the input into two parts: tokens to be processed and tokens to be bypassed
+        x_process = x[mask].view(batch_size, k, -1)
+        x_bypass = x[~mask].view(batch_size, seq_len - k, -1)
+
+        # Process the selected tokens through the self-attention and feedforward sublayers
+        self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory)
+        x_process = self.self_attention_resop(x_process, self_attn)
+
+        if encoder_output is not None and not isinstance(self.cross_attention_sublayer, nn.Identity):
+            cross_attn = lambda y: self.cross_attention_sublayer(y, encoder_output, encoder_output, layer_recurrent_memory)
+            x_process = self.cross_attention_resop(x_process, cross_attn)
+
+        feedforward = lambda y: self.feedforward_sublayer(y)
+        x_process = self.feedforward_resop(x_process, feedforward)
+
+        # Merge the processed and bypassed tokens back into a single tensor
+        x_merged = torch.zeros_like(x)
+        x_merged[mask] = x_process.view(-1, x.shape[-1])
+        x_merged[~mask] = x_bypass.view(-1, x.shape[-1])
+
+        return x_merged * router_weights.unsqueeze(-1)
+
+
+
+
 # Does not work with torch.compile
 # FIXME - compile may work w/ torch 2.1.2, but may require dummy value for reentrant or no non-tensors (Nones) to be passed in to forward() calls
 # FIXME - even in 2.1.2 compile still appears not to work w/ deepspeed checkpointing, but that may be fixable w/ custom re-implementation of ds ckpt code

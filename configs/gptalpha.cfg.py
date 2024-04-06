@@ -19,13 +19,13 @@ VOCAB_SIZE = 50304
 TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
-LOG_PROJECT = 'gptcore'
+LOG_PROJECT = 'llmtriainin'
 LOG_NAME = 'GPTAlpha L12D768H12CM2V1Adam'
 
 cli.Config(
     seed_everything = 1337,
     compile = True,
-
+    pretest=False,
     model_factory = lambda: model.core.Decoder(
         hparams = model.hparams.HParams(
             vocab_size = VOCAB_SIZE,
@@ -64,7 +64,7 @@ cli.Config(
             log_every_n_steps=20,
             logger = [
                 #lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                #lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
         ),
         datamodule_factory=lambda: dataset.DM(
