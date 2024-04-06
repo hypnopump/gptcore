@@ -22,7 +22,8 @@ import model.interface
 import posemb.interface
 
 from model.hparams import HParams
-from functools import wraps
+from functools import wraps, update_wrapper
+
 
 #import torch._dynamo
 
@@ -347,55 +348,74 @@ class TokenRouter(nn.Module):
         return weights
 
 
-def copy_signature_from_parent(child_init: Callable, parent_class: Any) -> Callable:
-    """
-    Dynamically adjusts the child __init__ method signature to match the parent's,
-    while retaining the child __init__'s functionality including additional arguments.
-    """
-    parent_init = parent_class.__init__
-    child_init.__signature__ = inspect.signature(parent_init)
-    return child_init
+def extend_signature_with_parent(parent_class):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        parent_init = parent_class.__init__
+        child_params = inspect.signature(func).parameters
+        parent_params = inspect.signature(parent_init).parameters
+
+        new_params = list(parent_params.values())[1:]  # Skip 'self' from parent
+        new_params += list(child_params.values())[1:]  # Skip 'self' from child, to avoid duplication
+
+        wrapper.__signature__ = inspect.Signature(parameters=new_params)
+        return wrapper
+
+    return decorator
 
 
 class MoDBlock(TransformerLayer):
     """ Monkeypatch LayerPart and do MoD instead.
-    Copied from: https://github.com/kyegomez/Mixture-of-Depths
+    MoD paper: https://arxiv.org/abs/2404.02258
     """
-    @wraps(TransformerLayer.__init__)
-    def __init__(self, *args, **kwargs):
-        # TODO: fix this signature issue with subclasses/factories
-        # def __init__(self, *args, capacity: float=0.3, prob: float | None = None, **kwargs):
+    @extend_signature_with_parent(TransformerLayer)
+    def __init__(self, *args, capacity: float = 0.5, every_other_dense: bool = True, **kwargs):
+        """ Inputs.
+        * capacity: Fraction of tokens to process in the block.
+        * every_other_dense: Whether to enable routing only every other block.
+        """
         super().__init__(*args,  **kwargs)
         hparams = self.hparams
-
         self.router = TokenRouter(hparams.d_model)
-        self.capacity = 0.5
+        self.capacity = capacity
+        self.every_other_dense = every_other_dense
+        if every_other_dense and self.layer_id % 2 == 1:
+            self.capacity = 1.0
+        # FIXME: use a probability in addition to a fraction as a discriminator
+        # FIXME: so it can be used in AR generation (nontrivial)
         self.prob = None
 
     def forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
         # return self.loop_forward(x, encoder_output, layer_recurrent_memory)
         return self.batch_forward(x, encoder_output, layer_recurrent_memory)
 
-    def batch_forward(self, x: Tensor, encoder_output: Tensor | None = None,
-                     layer_recurrent_memory: Optional[Tensor] = None):
+    def batch_forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
         """ WARNING! This is a monkeypatched forward method; really only accepts X.
         Exploits same num of active toks per sample to do in batched mode
         """
+        # FIXME: this seems easir but works badly with compile - trashy ML tech
+        # if self.every_other_dense and self.layer_id % 2 == 1:
+        #     return super().forward(x)
+
         b, s, d = x.shape
         weights = self.router(x)
 
         # Compute B-th percentil for router weightsto determine the capacity threshold
         k = int(self.capacity * s)
         top_k_values, top_k_idxs = torch.topk(weights, k, dim=1, sorted=True)
+
         # (B, L, K) -> (B, L)
         # threshold = self.prob
         # if threshold is None:
         #     threshold = top_k_values[:, -1]
+        # selected_mask = weights > threshold.unsqueeze(-1)
 
-        # Determine which tokens exceed the threshold # (B, L)
+        # TODO: skip threshold for now, just use topk to batch computation (B, L)
         selected_mask = x.new_zeros(b, s, dtype=torch.bool)
         selected_mask.scatter_(1, top_k_idxs, True)
-        # selected_mask = weights > threshold.unsqueeze(-1)
 
         # Process only selected tokens through the block
         processed_tokens = torch.zeros_like(x)
@@ -408,6 +428,9 @@ class MoDBlock(TransformerLayer):
 
     def loop_forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
         """ WARNING! This is a monkeypatched forward method; really only accepts X. """
+        if self.every_other_dense and self.layer_id % 2 == 1:
+            return super().forward(x, encoder_output, layer_recurrent_memory)
+
         b, s, d = x.shape
         weights = self.router(x)
 
@@ -437,9 +460,6 @@ class MoDBlock(TransformerLayer):
         # Combine processed tokens with unprocessed ones
         output = processed_tokens + x
         return output
-
-# MoDBlock.__init__ = copy_signature_from_parent(MoDBlock.__init__, TransformerLayerPart)
-
 
 
 # Does not work with torch.compile

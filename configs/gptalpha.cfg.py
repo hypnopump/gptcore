@@ -46,7 +46,8 @@ cli.Config(
         #     feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
         # ),
         layer_factory=lambda: model.core.MoDBlock(
-            # capacity=0.3,
+            capacity=0.5,
+            every_other_dense=True,
             self_attention_sublayer_factory = lambda: model.core.AttentionSubLayer(
                 attention_factory = lambda:model.core.TorchAttention(bias_mask_factory=lambda **kwargs: mask.AlibiMask(**kwargs)),
             ),
