@@ -98,6 +98,8 @@ class CoreLightningTrainer(cli.ITrainer):
         trainer : lightning.Trainer = self.lightning_trainer_factory(num_sanity_val_steps=0)#, enable_progress_bar=False)#num_sanity_val_steps=1)
         if cfg.compile:
             try:
+                # FIXME: torch._dynamo hit config.cache_size_limit (64)
+                torch._dynamo.config.cache_size_limit = 512
                 lightning_model.model = torch.compile(lightning_model.model)
             except Exception as e:
                 print(f"Skipping torch.compile due to error: {e}")
@@ -243,9 +245,9 @@ class CoreLightningModel(LightningModule):
 
     def _get_loss_logits_preds(self, batch, batch_idx):
         x, y = batch
-        logits = self(x)
+        logits, aux_loss = self(x)
     
-        loss = self.loss_fn(logits.view(-1, logits.size(-1)), y.flatten())
+        loss = self.loss_fn(logits.view(-1, logits.size(-1)), y.flatten()) + aux_loss
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
 

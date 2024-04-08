@@ -318,22 +318,33 @@ class TransformerLayer(TransformerLayerPart):
         self.feedforward_sublayer = feedforward_sublayer_factory()
         self.feedforward_resop = residual_op_factory()
 
+    def handle_aux_loss(self, x: Tuple[Tensor, Tensor] | Tensor, aux_loss: Tensor | float) -> Tensor:
+        """ Handles potential presence of aux loss (ex. MoE router, MoA router, etc) """
+        if isinstance(x, tuple):
+            x, aux_loss_x = x
+            aux_loss = aux_loss + aux_loss_x
+        return x, aux_loss
+
     def forward(self, x : Tensor, encoder_output : Tensor | None = None, layer_recurrent_memory : Tensor | None = None, idxs: Tensor | None = None):
+        aux_loss = 0.
         # self attention (query, key, and value are all based on the same inputs)
         self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory, idxs=idxs)
         x = self.self_attention_resop(x, self_attn) # this code looks a little complicated, but it's just allowing us to swap out whether we add or mix the residual
+        x, aux_loss = self.handle_aux_loss(x, aux_loss)
 
         # optional cross attention (query is based on the current input, but key and value are based on the encoder's output)
         # NOTE - we check against nn.Identity because the normal nn.Identity module does not allow extra arguments passed, though our interface.Identity version does
         if encoder_output is not None and not isinstance(self.cross_attention_sublayer, nn.Identity):
             cross_attn = lambda y: self.cross_attention_sublayer(y, encoder_output, encoder_output, layer_recurrent_memory)
             x = self.cross_attention_resop(x, cross_attn)
+            x, aux_loss = self.handle_aux_loss(x, aux_loss)
 
         # feedforward network
         feedforward = lambda y: self.feedforward_sublayer(y)
         x = self.feedforward_resop(x, feedforward)
+        x, aux_loss = self.handle_aux_loss(x, aux_loss)
 
-        return x
+        return x, aux_loss
 
 
 class TokenRouter(nn.Module):
@@ -372,7 +383,7 @@ class MoDBlock(TransformerLayer):
     MoD paper: https://arxiv.org/abs/2404.02258
     """
     @extend_signature_with_parent(TransformerLayer)
-    def __init__(self, *args, capacity: float = 0.5, every_other_dense: bool = True, **kwargs):
+    def __init__(self, *args, capacity: float = 0.5, every_other_dense: bool = True, aux_loss_coeff: float = 0.0, **kwargs):
         """ Inputs.
         * capacity: Fraction of tokens to process in the block.
         * every_other_dense: Whether to enable routing only every other block.
@@ -384,22 +395,23 @@ class MoDBlock(TransformerLayer):
         self.every_other_dense = every_other_dense
         if every_other_dense and self.layer_id % 2 == 1:
             self.capacity = 1.0
+            # FIXME: if/else in fw seems easier but works badly with compile - trashy ML tech
+            # overwrite forward method to skip routing
+            self.forward = super().forward
         # FIXME: use a probability in addition to a fraction as a discriminator
         # FIXME: so it can be used in AR generation (nontrivial)
-        self.prob = None
+        self.prob = 1. - self.capacity  # min threshold needed to process token
+        self.aux_loss_coeff = aux_loss_coeff
+        self.do_aux_loss = aux_loss_coeff > 1e-12
+        self.aux_loss = nn.BCEWithLogitsLoss()
 
     def forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
-        # return self.loop_forward(x, encoder_output, layer_recurrent_memory)
         return self.batch_forward(x, encoder_output, layer_recurrent_memory)
 
     def batch_forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
         """ WARNING! This is a monkeypatched forward method; really only accepts X.
         Exploits same num of active toks per sample to do in batched mode
         """
-        # FIXME: this seems easir but works badly with compile - trashy ML tech
-        # if self.every_other_dense and self.layer_id % 2 == 1:
-        #     return super().forward(x)
-
         b, s, d = x.shape
         weights = self.router(x)
 
@@ -418,49 +430,26 @@ class MoDBlock(TransformerLayer):
         selected_mask.scatter_(1, top_k_idxs, True)
 
         # Process only selected tokens through the block
-        processed_tokens = torch.zeros_like(x)
-        processed_tokens[selected_mask] = (super().forward(
-            x[selected_mask].reshape(b, -1, d), idxs=top_k_idxs
-        ).reshape(-1, d) - x[selected_mask]) * weights[selected_mask].unsqueeze(-1).sigmoid()
-        processed_tokens = processed_tokens + x
+        processed_tokens, aux_loss_process = super().forward(x[selected_mask].view(b, -1, d), idxs=top_k_idxs)
+        processed_tokens_buffer = torch.zeros_like(x)
+        # undo residual and weight accordingly before residual connection as in paper
+        processed_tokens_buffer[selected_mask] = (
+            processed_tokens.view(-1, d) - x[selected_mask]
+        ) * weights[selected_mask].unsqueeze(-1).sigmoid()
+        processed_tokens_buffer = processed_tokens_buffer + x
 
-        return processed_tokens.contiguous()
+        aux_loss = 0.
+        if self.do_aux_loss:
+            aux_loss = self.aux_loss(weights, selected_mask.to(weights)) * self.aux_loss_coeff
 
-    def loop_forward(self, x: Tensor, encoder_output: Tensor | None = None, layer_recurrent_memory: Optional[Tensor] = None):
-        """ WARNING! This is a monkeypatched forward method; really only accepts X. """
-        if self.every_other_dense and self.layer_id % 2 == 1:
-            return super().forward(x, encoder_output, layer_recurrent_memory)
+        return processed_tokens_buffer, aux_loss
 
-        b, s, d = x.shape
-        weights = self.router(x)
-
-        # Compute B-th percentil for router weightsto determine the capacity threshold
-        k = int(self.capacity * s)
-        top_k_values, _ = torch.topk(weights, k, dim=1, sorted=True)
-        # (B, L, K) -> (B, L)
-        threshold = self.prob
-        if threshold is None:
-            threshold = top_k_values[:, -1]
-
-        # Determine which tokens exceed the threshold
-        selected_mask = weights > threshold.unsqueeze(-1)
-
-        # Process onlys elected tokens through the block
-        processed_tokens = torch.zeros_like(x)
-        for i in range(b):
-            # Process tokens for each block
-            selected_tokens = x[i][selected_mask[i]]
-            if selected_tokens.size(0) > 0:
-                processed_tokens[i][selected_mask[i]] = (
-                    super().forward(
-                        selected_tokens.unsqueeze(0)
-                    ).squeeze(0) - x[i][selected_mask[i]]
-                ) * weights[i][selected_mask][..., None].sigmoid()
-
-        # Combine processed tokens with unprocessed ones
-        output = processed_tokens + x
-        return output
-
+    def inference(self, x: Tensor) -> Tensor:
+        """
+        1. route
+        2. if 1-prob > self.capacity; skip
+        """
+        raise NotImplementedError("Inference not implemented for MoD block")
 
 # Does not work with torch.compile
 # FIXME - compile may work w/ torch 2.1.2, but may require dummy value for reentrant or no non-tensors (Nones) to be passed in to forward() calls
@@ -532,14 +521,16 @@ class Transformer(nn.Module):
 
         # run the main transformer
         # FIXME - annoyingly, we can't just call nn.Sequential because we have to pass through the specific recurrent_memory layer
+        aux_loss = 0.
         for i, layer in enumerate(self.layers):
-            x = layer(x, encoder_output, recurrent_memory[i] if recurrent_memory is not None else None)
+            x, aux_loss_i = layer(x, encoder_output, recurrent_memory[i] if recurrent_memory is not None else None)
+            aux_loss = aux_loss + aux_loss_i
 
         # convert from final layer embedding to output logits
         x = self.final_norm(x)
         x = self.unembed(x)
 
-        return x
+        return x, aux_loss
 
     def _init_weights(self):
         for name, m in self.named_modules():               

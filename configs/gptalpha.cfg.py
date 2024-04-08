@@ -20,7 +20,14 @@ TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
 LOG_PROJECT = 'llmtriainin'
-LOG_NAME = 'GPTAlpha L12D768H12CM2V1Adam'
+# 120M
+# LOG_NAME = 'GPTAlpha L12D768H12CM2V1Adam'
+
+# 250M dense
+LOG_NAME = 'GPTAlpha L16D1024H16CM2V1Adam'
+# LOG_NAME = 'GPTAlpha L20D1024H16CM2V1Adam MoD(capacity=0.5, everyOther)'
+
+
 
 cli.Config(
     seed_everything = 1337,
@@ -31,9 +38,10 @@ cli.Config(
             vocab_size = VOCAB_SIZE,
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
-            n_layer=12,
-            n_head=12,
-            d_model=768,
+            # 50% on 50% the blocks => 25% less compute => 25% wider (and still below FLOPs)
+            n_layer=16,
+            n_head=18,
+            d_model=1152,
 
             feedforward_d_model_ratio=3,
 
@@ -47,6 +55,7 @@ cli.Config(
         # ),
         layer_factory=lambda: model.core.MoDBlock(
             capacity=0.5,
+            aux_loss_coeff=1e-4,
             every_other_dense=True,
             self_attention_sublayer_factory = lambda: model.core.AttentionSubLayer(
                 attention_factory = lambda:model.core.TorchAttention(bias_mask_factory=lambda **kwargs: mask.AlibiMask(**kwargs)),
