@@ -99,7 +99,7 @@ class CoreLightningTrainer(cli.ITrainer):
         if cfg.compile:
             try:
                 # FIXME: torch._dynamo hit config.cache_size_limit (64)
-                torch._dynamo.config.cache_size_limit = 512
+                torch._dynamo.config.cache_size_limit = 1024
                 lightning_model.model = torch.compile(lightning_model.model)
             except Exception as e:
                 print(f"Skipping torch.compile due to error: {e}")

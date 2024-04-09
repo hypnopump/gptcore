@@ -39,9 +39,9 @@ cli.Config(
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
             # 50% on 50% the blocks => 25% less compute => 25% wider (and still below FLOPs)
-            n_layer=16,
-            n_head=18,
-            d_model=1152,
+            n_layer=16*2,
+            n_head=16,
+            d_model=1024,
 
             feedforward_d_model_ratio=3,
 
@@ -54,7 +54,7 @@ cli.Config(
         #     feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
         # ),
         layer_factory=lambda: model.core.MoDBlock(
-            capacity=0.5,
+            capacity=0.125,
             aux_loss_coeff=1e-4,
             every_other_dense=True,
             self_attention_sublayer_factory = lambda: model.core.AttentionSubLayer(
