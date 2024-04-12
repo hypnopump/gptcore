@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 from torch import Tensor
 
-from .rwkv_inner import rwkv_inner
+from .rwkv_inner import rwkv_inner, vvmap_delta_rule
 
 # version without u 'bonus' term
 def rwkv6_0_simple_recurrent(r_in, k_in, v_in, w_in, kv_state):
@@ -152,8 +152,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
         self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
         self.key = nn.Linear(args.n_embd, self.n_kv_head * self.k_head_size, bias=False)
-        self.weight = nn.Linear(args.n_embd, self.n_kv_head * self.k_head_size, bias=False)
         self.value = nn.Linear(args.n_embd, self.n_kv_head * self.v_head_size, bias=False)
+        self.beta = nn.Linear(args.n_embd, self.n_kv_head, bias=False)
         self.output = nn.Linear(args.dim_v, args.n_embd, bias=False)
         self.gate = nn.Linear(args.n_embd, args.dim_v, bias=False)
 
@@ -234,13 +234,16 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             kv_state = kv_state.contiguous().to(torch.bfloat16)        
 
         w = time_decay.view(1,H,1,K)
-        # w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
-        w = w + self.weight(wx).view(B, T, H, K).transpose(1, 2)  # BHTK
+        w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
         w = torch.exp(-torch.exp(w))
-        # k = 1-w
 
         u = time_first.view(1,H,1,K)
         out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
+
+        beta = self.beta(kx).mT.sigmoid()
+        k = torch.nn.functional.normalize(k, p=2, dim=-1)
+        r = torch.nn.functional.normalize(r, p=2, dim=-1)
+        out = vvmap_delta_rule(r, k, v, beta) + out
 
         out = out.transpose(1,2).reshape(B*T, H*V)
         out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)

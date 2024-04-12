@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import torch as th
 from torch import Tensor
 
 # 24 is optimal chunk length (longer will use too much memory and cause precision problems or even numerical instability, shorter is inefficient)
@@ -110,4 +111,68 @@ def rwkv_inner(r,k,v,w,u,kv_state,chunk_len:int=16,precision_dtype:torch.dtype=t
         out = out + (r * w_intra) @ states # BHNTV
         out = out.view(B,H,L,V)
         return out, kv_state
-            
+
+
+def delta_rule_chunkwise2(q: th.Tensor, k: th.Tensor, v: th.Tensor, beta: th.Tensor, chunk_size: int = 24) -> th.Tensor:
+    """ https://arxiv.org/abs/2404.07143
+    Wrap with functorch for batched inputs.
+    Notation:
+    - t: chunks
+    - c: chunk_size
+    - d: dimension
+    Inputs:
+    * q: (L, D)
+    * k: (L, D)
+    * v: (L, D)
+    * beta: (L) -> scalar for gating. stands for sigmoid(beta) in paper.
+    * chunk_size: int. Lower for less mem.
+    Outputs: (L, D)
+    """
+    l, d_k = q.shape
+    d_v = v.shape[-1]
+    T, C = l // chunk_size, chunk_size
+    if l % C != 0:
+        C = 1
+    T = l // C
+
+    v = v * beta[..., None]
+    k_beta = k * beta[..., None]
+    # (l, d) -> (t, c, d)
+    q, k, v, k_beta = map(lambda x: x.reshape(T, C, -1), [q, k, v, k_beta])
+    # (t, ci, cj)
+    attn = th.tril(k_beta @ k.mT, -1)
+
+    # (t, c, dv+dk)
+    k_cumsum = th.zeros_like(v)
+    k_cumdecay = th.zeros_like(k_beta)
+    k_cumsum[:, 0] = v[:, 0]
+    k_cumdecay[:, 0] = k_beta[:, 0]
+
+    for i in range(1, C):
+        # (t, 1, d) -> (t, 1, d) - [ [ (t, 1, :i) -> (t, 1, :i) ] @ (t, :i, d) ] -> (t, 1, d)
+        k_cumsum[:, i] = v[:, i] - (attn[:, i, :i, None].mT @ k_cumsum[:, :i]).squeeze(1)
+        # (t, 1, d) -> (t, 1, d) - [ [ (t, 1, :i) -> (t, 1, :i) ] @ (t, :i, d) ] -> (t, 1, d)
+        k_cumdecay[:, i] = k_beta[:, i] - (attn[:, i, :i, None].mT @ k_cumdecay[:, :i]).squeeze(1)
+
+    v = k_cumsum
+    s = k.new_zeros(d_k, d_v)
+    S = []
+    V = []
+
+    kt = k.mT
+    for i in range(0, T):
+        S.append(s)
+        v_new = v[i] - k_cumdecay[i] @ s
+        s = s + kt[i] @ v_new
+        V.append(v_new)
+    S = th.stack(S, 0)
+    V = th.stack(V, 0)
+
+    q = q * (d_k ** -0.5)
+    qk = th.tril(q @ kt)
+    out = q @ S + qk @ V
+    # (t, c, d) -> (l, d)
+    return out.reshape(l, -1)
+
+
+vvmap_delta_rule = th.vmap(th.vmap(delta_rule_chunkwise2))
