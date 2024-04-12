@@ -19,12 +19,12 @@ VOCAB_SIZE = 50304
 TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
-LOG_PROJECT = 'gptcore'
+LOG_PROJECT = 'gptcore-recursal'
 LOG_NAME = 'RWKV6.0x L12D768H12CM3Adam'
 
 cli.Config(
     seed_everything = 1337,
-    compile = True,
+    compile = False,
     pretest = False,
 
     model_factory = lambda: model.core.Decoder(
@@ -32,9 +32,9 @@ cli.Config(
             vocab_size = VOCAB_SIZE,
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
-            n_layer=12,
-            n_head=12,
-            d_model=768,
+            n_layer=24,
+            n_head=32,
+            d_model=2048,
 
             feedforward_d_model_ratio=3,
 
@@ -43,17 +43,23 @@ cli.Config(
 
             n_kv_head_ratio=1,
         ),
-        layer_factory=lambda: model.core.TransformerLayer(
-            self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
-            #feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
-            feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+        # layer_factory=lambda: model.core.TransformerLayer(
+        #     self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
+        #     #feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
+        #     feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+        # ),
+        layer_factory=lambda: model.core.GradientCheckpointing(
+            module_factory=lambda: model.core.TransformerLayer(
+                self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
+                feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+            )
         ),
     ),
 
     trainer_factory = lambda: lit.CoreLightningTrainer(
         optimizer_factory = lambda params: torch.optim.Adam(
             params=params,
-            lr=6e-4,
+            lr=1e-4,
             betas=(0.9,0.999),
         ),
         lightning_trainer_factory = lambda: lightning.Trainer(
