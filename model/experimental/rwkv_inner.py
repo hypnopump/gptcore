@@ -6,7 +6,7 @@ import torch as th
 from torch import Tensor
 
 # 24 is optimal chunk length (longer will use too much memory and cause precision problems or even numerical instability, shorter is inefficient)
-def rwkv_inner(r,k,v,w,u,kv_state,chunk_len:int=16,precision_dtype:torch.dtype=torch.float32):
+def rwkv_inner(r,k,v,w,u,kv_state,chunk_len:int=24,precision_dtype:torch.dtype=torch.float32):
     """
     expects
     r : (B,H,L,K)
