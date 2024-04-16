@@ -22,6 +22,8 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .rwkv_inner import rwkv_inner
+from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
+
 
 # version without u 'bonus' term
 def rwkv6_0_simple_recurrent(r_in, k_in, v_in, w_in, kv_state):
@@ -226,18 +228,20 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             time_first = time_first.expand(reps, KVH, K).contiguous().view(H, K)
 
         kv_state = recurrent_memory
-        if kv_state is None:
-            kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+        # if kv_state is None:
+        #     kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
 
-        if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
-            kv_state = kv_state.contiguous().to(torch.bfloat16)        
+        # if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
+        #     kv_state = kv_state.contiguous().to(torch.bfloat16)
 
         w = time_decay.view(1,H,1,K)
         w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
         w = torch.exp(-torch.exp(w))
 
-        u = time_first.view(1,H,1,K)
-        out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
+        u = time_first.view(H,K)
+        # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
+        out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)
+        breakpoint()
 
         out = out.transpose(1,2).reshape(B*T, H*V)
         out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)
