@@ -25,6 +25,8 @@ from .rwkv_inner import rwkv_inner
 from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
 
 
+# fused_recurrent_rwkv6 = torch._dynamo.disable(fused_recurrent_rwkv6)
+
 # version without u 'bonus' term
 def rwkv6_0_simple_recurrent(r_in, k_in, v_in, w_in, kv_state):
     B,H,L,K = r_in.shape
@@ -236,8 +238,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         w = time_decay.view(1,H,1,K)
         w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
-        w = (1e-4 + 0.9999*torch.exp(-torch.exp(w))).log()
-
+        w = -torch.exp(w) # log(exp(-exp))
         u = time_first.view(H,K)
         # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
         out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)

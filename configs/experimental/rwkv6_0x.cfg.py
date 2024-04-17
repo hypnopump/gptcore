@@ -67,12 +67,13 @@ cli.Config(
             log_every_n_steps=20,
             logger = [
                 #lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                # lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
             #devices=1,
             #strategy='ddp',
             #strategy="deepspeed_stage_2",
             #strategy='ddp_find_unused_parameters_true',
+            deterministic=True,
         ),
         datamodule_factory=lambda: dataset.DM(
             dataset_path='dataset/pile.py', 
