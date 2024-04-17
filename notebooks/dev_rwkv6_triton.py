@@ -1,3 +1,5 @@
+# run with: TRITON_INTERPRET=0 python dev_rwkv6_triton.py
+
 import torch as th
 import torch.nn.functional as F
 
@@ -17,7 +19,7 @@ def naive_recurrent_rwkv6_umat(
     """ Inputs:
     * q, k: (B, H, L, K)
     * v: (B, H, L, V)
-    * w: (B, H, L, K, V)
+    * w: (B, H, L, K)
     * u: (H, K, V)
     Outputs: (B, H, K, V)
     """
@@ -37,15 +39,16 @@ def naive_recurrent_rwkv6_umat(
         v_i = v[:, :, i, :]
         w_i = w[:, :, i].exp()
         kv_i = k_i[..., None] * v_i[..., None, :]
+        #print("study u")
+        # breakpoint()
         o_i = (h + u[None, ...] * kv_i) * q_i[..., None]
         o[:, :, i] = o_i.sum(-2)
-        h = h * w_i + kv_i
+        h = h * w_i[..., None] + kv_i
     return o.to(orig_dtype)
 
 
 
 
-#########################
 # -*- coding: utf-8 -*-
 
 # Copyright (c) 2024, Songlin Yang
@@ -64,13 +67,13 @@ from fla.utils import contiguous
 
 
 @triton.jit
-def fused_recurrent_rwkv6hypno_fwd_kernel(
+def fused_recurrent_rwkv6_fwd_kernel(
     # B: batch_size, H: n_heads, T: seq_len, D: d_head
     q,  # query [B, H, L, D_head_K]
     k,  # key [B, H, L, D_head_K]
     v,  # value [B, H, L, D_head_V]
     w,  # log gate [B, H, L, D_head_K]
-    u,  # bonus [B, H, D_head_K]
+    u,  # bonus [B, H, D_head_K, D_head_V]
     o,  # output [B, H, L, D_head_V]
     # initial hidden state initialization [B, H, D_head_K, D_head_V]
     initial_state,
@@ -112,7 +115,11 @@ def fused_recurrent_rwkv6hypno_fwd_kernel(
     p_w = w + i_bh * s_qk_h + i_k * BK + \
         tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
 
-    p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
+    # vector U
+    # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
+    p_u = u + i_h * DK * DV + \
+          (i_k * BK + tl.arange(0, BK)[None, :]) * \
+          DV + (i_v * BV + tl.arange(0, BV)[:, None])
 
     mask_bk = (i_k * BK + tl.arange(0, BK)) < DK
     mask_bv = (i_v * BV + tl.arange(0, BV)) < DV
@@ -127,8 +134,7 @@ def fused_recurrent_rwkv6hypno_fwd_kernel(
             DV + (i_v * BV + tl.arange(0, BV)[:, None])
         h += tl.load(p_init_s, mask=mask_kv, other=0).to(tl.float32)
 
-    _u = tl.load(p_u, mask=mask_bk, other=0).to(tl.float32)
-    breakpoint()
+    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
     for _ in range(0, T):
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
@@ -136,7 +142,7 @@ def fused_recurrent_rwkv6hypno_fwd_kernel(
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
         _w = tl.exp(_w)
         _kv = _k[None, :] * _v[:, None]
-        _o = (h + _kv * _u[None, :]) * _q[None, :]
+        _o = (h + _kv * _u[:]) * _q[None, :]
         _o = tl.sum(_o, axis=1)
         h = h * _w[None, :]
         h += _kv
@@ -152,6 +158,7 @@ def fused_recurrent_rwkv6hypno_fwd_kernel(
             (i_k * BK + tl.arange(0, BK)[None, :]) * \
             DV + (i_v * BV + tl.arange(0, BV)[:, None])
         tl.store(p_final_s, h.to(p_final_s.dtype.element_ty), mask=mask_kv)
+
 
 # Similar to Algorithm1 of https://arxiv.org/abs/2006.16236
 @triton.jit
@@ -191,7 +198,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
-
     p_k = k + i_bh * s_qk_h + i_k * BK + \
         tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
     p_v = v + i_bh * s_vo_h + i_v * BV + \
@@ -358,11 +364,10 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             final_state = None
 
         grid = (NV, NK, batch_size * n_heads)
-        fused_recurrent_rwkv6hypno_fwd_kernel[grid](
+        fused_recurrent_rwkv6_fwd_kernel[grid](
             q, k, v, w, u, o, initial_state, final_state,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
-            # w.stride(1), w.stride(2), w.stride(3), w.stride(4),
             batch_size, n_heads, seq_len, scale,
             DK=d_head_qk, DV=d_head_v, BK=BK, BV=BV,
             USE_INITIAL_STATE=initial_state is not None,
@@ -472,7 +477,7 @@ def fused_recurrent_rwkv6hypno(
         w (torch.Tensor):
             data-dependent decays of shape `(B, H, T, K)` in log space! Alias: g.
         u (torch.Tensor):
-            bonus of shape `(H, K)`
+            bonus of shape `(H, K, V)`
         scale (Optional[int]):
             Scale factor for the RWKV6 attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -488,10 +493,11 @@ def fused_recurrent_rwkv6hypno(
     o, final_state = FusedRecurrentRWKV6Function.apply(r, k, v, w, u, scale, initial_state, output_final_state)
     return o, final_state
 
+
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 8, 2, 2
+    B, H, L, K, V = 1, 1, 4, 8, 2
 
     th.manual_seed(17)
     
@@ -503,21 +509,20 @@ if __name__ == "__main__":
     wt = th.randn(B, H, L, K, device=device, requires_grad=True)
     ut = th.randn(H, K, device=device, requires_grad=True)
     wt = -th.exp(wt)
+    u_ = ut[..., None].repeat(1, 1, V)
 
-    o = naive_recurrent_rwkv6_umat(rt, kt, vt, wt, ut[..., None])
-    o.mean().backward()
-    # print(o)
-    print("naive", ut.grad)
+    o = naive_recurrent_rwkv6_umat(rt, kt, vt, wt, u_)
+    print("naive kernel", o)
+    # o.mean().backward()
+    # print("naive", ut.grad)
 
-    # ot = fused_recurrent_rwkv6hypno(rt, kt, vt, wt, u_[..., 0], scale=1)
     ut.grad = None
-    ot = fused_recurrent_rwkv6hypno(rt, kt, vt, wt, ut, scale=1)
+    ot = fused_recurrent_rwkv6hypno(rt, kt, vt, wt, u_, scale=1)
+    print("modified kernel", ot)
     # ot.mean().backward()
-    # print(ot)
-    print("fused", ut.grad)
+    # print("fused", ut.grad)
 
-    print("and default rwkv")
     ut.grad = None
-    ot = fused_recurrent_rwkv6(rt, kt, vt, wt[..., 0], ut[..., 0], scale=1)
-    # print(ot)
-    print(ut.grad)
+    ot = fused_recurrent_rwkv6(rt, kt, vt, wt, ut, scale=1)
+    print("and default rwkv", ot)
+    # print(ut.grad)
