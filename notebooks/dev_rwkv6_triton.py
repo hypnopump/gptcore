@@ -21,7 +21,7 @@ def naive_recurrent_rwkv6_umat(
     * v: (B, H, L, V)
     * w: (B, H, L, K)
     * u: (H, K, V)
-    Outputs: (B, H, K, V)
+    Outputs: (B, H, L, K)
     """
     orig_dtype = q.dtype
     q, k, v, w, u = map(lambda x: x.float(), (q, k, v, w, u))
@@ -39,8 +39,6 @@ def naive_recurrent_rwkv6_umat(
         v_i = v[:, :, i, :]
         w_i = w[:, :, i].exp()
         kv_i = k_i[..., None] * v_i[..., None, :]
-        #print("study u")
-        # breakpoint()
         o_i = (h + u[None, ...] * kv_i) * q_i[..., None]
         o[:, :, i] = o_i.sum(-2)
         h = h * w_i[..., None] + kv_i
@@ -168,7 +166,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     k,  # key [B, H, L, D_head_V]
     v,  # value [B, H, L, D_head_V]
     w,  # log gate [B, H, L, D_head_K]
-    u,  # bonus [B, H, D_head_K]
+    u,  # bonus [B, H, D_head_K, D_head_V]
 
     do,  # gradient of output [B, H, L, D_head_V]
     dq,  # gradient of query [NV, B, H, L, D_head_K]
@@ -210,12 +208,17 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
     p_w = w + i_bh * s_qk_h + i_k * BK + \
         tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
-    p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
+        
+    # vector U
+    # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
+    p_u = u + i_h * DK * DV + \
+          (i_k * BK + tl.arange(0, BK)[:, None]) * \
+          DV + (i_v * BV + tl.arange(0, BV)[None, :])
 
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
     mask_kv = mask_bk[:, None] & mask_bv[None, :]
-    _u = tl.load(p_u, mask=mask_bk, other=0).to(tl.float32)
+    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
     h = tl.zeros([BV, BK], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
@@ -232,7 +235,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
         _w = tl.exp(_w)
         h_q = h * _do[:, None]
-        _dq = tl.sum(h_q + _kv * _u[None, :] * _do[:, None], axis=0)
+        _dq = tl.sum(h_q + _kv * _u.T * _do[:, None], axis=0)
         _dq *= scale
         _dq_aux = tl.sum(h_q, axis=0)
         h = h * _w[None, :]
@@ -303,9 +306,14 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     d_h = tl.zeros([BK, BV], dtype=tl.float32)
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
+    mask_kv = mask_bk[:, None] & mask_bv[None, :]
 
-    p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
-    _u = tl.load(p_u, mask=mask_bk, other=0).to(tl.float32)
+    # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
+    p_u = u + i_h * DK * DV + \
+          (i_k * BK + tl.arange(0, BK)[:, None]) * \
+          DV + (i_v * BV + tl.arange(0, BV)[None, :])
+
+    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
 
     for i in range(T-1, -1, -1):
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
@@ -315,8 +323,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         _dkv = _q[:, None] * _do[None, :]
         d_k = tl.sum(d_h * _v[None, :], axis=1)
         tl.store(p_dk_aux, d_k.to(p_dk_aux.dtype.element_ty), mask=mask_bk)
-        d_k += tl.sum(_dkv * _u[:, None] * _v[None, :], axis=1)
-        d_v = tl.sum((d_h + (_dkv * _u[:, None])) * _k[:, None], axis=0)
+        d_k += tl.sum(_dkv * _u * _v[None, :], axis=1)
+        d_v = tl.sum((d_h + (_dkv * _u)) * _k[:, None], axis=0)
 
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
         _w = tl.exp(_w)
@@ -450,7 +458,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dw = torch.nn.functional.pad(dw, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
         dw = chunk_reversed_cumsum_fwd(dw).to(w)
 
-        du = ((do * v).sum(-1)[..., None] * k * q * scale).sum([0, -2]).to(u)
+        du = th.einsum('bhnv,bhnk->hkv', do*v, q*k*scale)
+        # du = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
 
 
@@ -497,32 +506,55 @@ def fused_recurrent_rwkv6hypno(
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 4, 8, 2
+    B, H, L, K, V = 1, 1, 16, 8, 2
+    def gen_inputs(): 
+        th.manual_seed(17)
+        
+        device = "cuda"
 
-    th.manual_seed(17)
+        # triton inputs
+        rt = th.randn(B, H, L, K, device=device, requires_grad=True)
+        kt = th.randn(B, H, L, K, device=device, requires_grad=True)
+        vt = th.randn(B, H, L, V, device=device, requires_grad=True)
+        wt = th.randn(B, H, L, K, device=device, requires_grad=True)
+        ut = th.randn(H, K, device=device, requires_grad=True)
+        return rt, kt, vt, wt, ut
     
-    device = "cuda"
-
-    # triton inputs
-    rt, kt = th.randn(2, B, H, L, K, device=device, requires_grad=True)
-    vt = th.randn(B, H, L, V, device=device, requires_grad=True)
-    wt = th.randn(B, H, L, K, device=device, requires_grad=True)
-    ut = th.randn(H, K, device=device, requires_grad=True)
-    wt = -th.exp(wt)
+    rt, kt, vt, wt, ut = gen_inputs()
     u_ = ut[..., None].repeat(1, 1, V)
+    w_ = -th.exp(wt)
+    o = naive_recurrent_rwkv6_umat(rt, kt, vt, w_, u_)
+    # print("naive kernel", o)
+    o.mean().backward()
+    grads = {
+        "ut": ut.grad.clone(), 
+        "wt": wt.grad.clone(),
+        "rt": rt.grad.clone(),
+        "kt": kt.grad.clone(),
+        "vt": vt.grad.clone()
+    }
 
-    o = naive_recurrent_rwkv6_umat(rt, kt, vt, wt, u_)
-    print("naive kernel", o)
-    # o.mean().backward()
-    # print("naive", ut.grad)
+    
+    rt, kt, vt, wt, ut = gen_inputs()
+    u_ = ut[..., None].repeat(1, 1, V)
+    w_ = -th.exp(wt)
+    ot, fstate = fused_recurrent_rwkv6hypno(rt, kt, vt, w_, u_, scale=1)
+    # print("modified kernel", ot)
+    ot.mean().backward()
+    # print("fused", ut.grad, rt.grad, kt.grad)
+    grad2 = {
+        "ut": ut.grad.clone(), 
+        "wt": wt.grad.clone(),
+        "rt": rt.grad.clone(),
+        "kt": kt.grad.clone(),
+        "vt": vt.grad.clone()
+    }
+    for k,v in grads.items(): 
+        print(f"k:{k} {grads[k] - grad2[k]}")
 
-    ut.grad = None
-    ot = fused_recurrent_rwkv6hypno(rt, kt, vt, wt, u_, scale=1)
-    print("modified kernel", ot)
-    # ot.mean().backward()
-    # print("fused", ut.grad)
-
-    ut.grad = None
-    ot = fused_recurrent_rwkv6(rt, kt, vt, wt, ut, scale=1)
-    print("and default rwkv", ot)
+    # rt, kt, vt, wt, ut = gen_inputs()
+    # u_ = ut[..., None].repeat(1, 1, V)
+    # ot, fstate = fused_recurrent_rwkv6(rt, kt, vt, wt, ut, scale=1)
+    # # print("and default rwkv", ot)
     # print(ut.grad)
+    
