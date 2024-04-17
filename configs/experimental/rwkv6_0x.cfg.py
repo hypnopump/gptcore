@@ -73,6 +73,7 @@ cli.Config(
             #strategy='ddp',
             #strategy="deepspeed_stage_2",
             #strategy='ddp_find_unused_parameters_true',
+            deterministic=True,
         ),
         datamodule_factory=lambda: dataset.DM(
             dataset_path='dataset/pile.py', 

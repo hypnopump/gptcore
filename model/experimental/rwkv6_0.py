@@ -140,7 +140,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             k_dim_att = args.n_kv_head * self.k_head_size
             decay_speed = torch.ones(k_dim_att)
             for n in range(k_dim_att):
-                decay_speed[n] = -6 + 5 * (n / max(k_dim_att - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+                decay_speed[n] = - (-6 + 5 * (n / max(k_dim_att - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1) + 3)
+                # decay_speed[n] = -6 + 5 * (n / max(k_dim_att - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
             self.time_decay = nn.Parameter(decay_speed.reshape(self.n_kv_head, self.k_head_size)) # (KVH, K)
             # print(layer_id, self.time_decay.flatten()[:3].cpu().numpy(), '...', self.time_decay.flatten()[-3:].cpu().numpy())
 
@@ -236,7 +237,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         w = time_decay.view(1,H,1,K)
         w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
-        w = (1e-4 + 0.9999*torch.exp(-torch.exp(w))).log()
+        # w = (1e-4 + 0.9999*torch.exp(-torch.exp(w))).log()
+        w = F.logsigmoid(w)
 
         u = time_first.view(H,K)
         # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
