@@ -25,6 +25,8 @@ from .rwkv_inner import rwkv_inner
 from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
 
 
+# fused_recurrent_rwkv6 = torch._dynamo.disable(fused_recurrent_rwkv6)
+
 # version without u 'bonus' term
 def rwkv6_0_simple_recurrent(r_in, k_in, v_in, w_in, kv_state):
     B,H,L,K = r_in.shape

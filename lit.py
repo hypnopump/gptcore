@@ -98,6 +98,7 @@ class CoreLightningTrainer(cli.ITrainer):
         trainer : lightning.Trainer = self.lightning_trainer_factory(num_sanity_val_steps=0)#, enable_progress_bar=False)#num_sanity_val_steps=1)
         if cfg.compile:
             try:
+                torch._dynamo.config.cache_size_limit = 2048
                 lightning_model.model = torch.compile(lightning_model.model)
             except Exception as e:
                 print(f"Skipping torch.compile due to error: {e}")
