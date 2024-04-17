@@ -236,12 +236,11 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         w = time_decay.view(1,H,1,K)
         w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
-        w = torch.exp(-torch.exp(w))
+        w = (1e-4 + 0.9999*torch.exp(-torch.exp(w))).log()
 
         u = time_first.view(H,K)
         # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
         out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)
-        breakpoint()
 
         out = out.transpose(1,2).reshape(B*T, H*V)
         out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)
