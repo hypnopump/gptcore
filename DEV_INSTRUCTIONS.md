@@ -81,6 +81,6 @@ python cli.py train -c configs/experimental/memtention_0x.cfg.py
 # gate MLP (no act -> if not -> tanh)
 
 # for triton development
-export TRITON_INTERPRET=1
+export TRITON_INTERPRET=0
 
 ```
