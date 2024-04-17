@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .rwkv_inner import rwkv_inner
+from .rwkv_triton import fused_recurrent_rwkv6hypno
 from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
 
 
@@ -103,6 +104,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
+        self.umat = True
 
         self.args = args
         self.layer_id = layer_id
@@ -146,12 +148,17 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             self.time_decay = nn.Parameter(decay_speed.reshape(self.n_kv_head, self.k_head_size)) # (KVH, K)
             # print(layer_id, self.time_decay.flatten()[:3].cpu().numpy(), '...', self.time_decay.flatten()[-3:].cpu().numpy())
 
-            tmp = torch.zeros(k_dim_att)
+            tmp = torch.zeros(k_dim_att, self.k_head_size)
             for n in range(k_dim_att):
                 zigzag = ((n + 1) % 3 - 1) * 0.1
                 tmp[n] = ratio_0_to_1 * (1 - (n / max(k_dim_att - 1, 1))) + zigzag
+                tmp[n, :] += torch.randn_like(tmp[n, :]) * 1e-4
 
-            self.time_first = nn.Parameter(tmp.reshape(self.n_kv_head, self.k_head_size)) # (KVH, K)
+            time_first = tmp.reshape(self.n_kv_head, self.k_head_size, self.k_head_size)
+            if self.umat:
+                self.time_first = nn.Parameter(time_first) # (KVH, K, K)
+            else: 
+                self.time_first = nn.Parameter(time_first[..., 0]) # (KVH, K)
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
         self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
@@ -239,9 +246,14 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         w = time_decay.view(1,H,1,K)
         w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
         w = -torch.exp(w) # log(exp(-exp))
-        u = time_first.view(H,K)
-        # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
-        out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)
+        
+        if self.umat: 
+            u = time_first.view(H,K,K)
+            out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)
+        else:
+            u = time_first.view(H,K)
+            # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
+            out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)
 
         out = out.transpose(1,2).reshape(B*T, H*V)
         out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)
