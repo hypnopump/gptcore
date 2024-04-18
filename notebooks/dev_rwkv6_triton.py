@@ -323,7 +323,128 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     p_dk_aux = dk_aux + (i_bh + i_v * B * H) * s_qk_h * DV + \
                (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
                (i_v * BV + tl.arange(0, BV)[None, :]) + \
-               ((T - 1) * DK if not REVERSE else 0)
+               ((T - 1) * DK * DV if not REVERSE else 0)
+
+    # vector W
+    # p_w = w + i_bh * s_qk_h + i_k * BK + \
+    #     tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+    p_w = w + i_bh * s_qk_h * DV + \
+          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[None, :]) + \
+          ((T - 1) * DK * DV if not REVERSE else 0)
+
+    d_u = tl.zeros([BK, BV], dtype=tl.float32)
+    d_h = tl.zeros([BK, BV], dtype=tl.float32)
+    mask_bk = i_k * BK + tl.arange(0, BK) < DK
+    mask_bv = i_v * BV + tl.arange(0, BV) < DV
+    mask_kv = mask_bk[:, None] & mask_bv[None, :]
+
+    # vector U
+    # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
+    p_u = u + i_h * DK * DV + \
+        (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+        (i_v * BV + tl.arange(0, BV)[None, :])
+    # in-loop gradient U contribution
+    p_du = du + i_bh * DK * DV + \
+        (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+        (i_v * BV + tl.arange(0, BV)[None, :])
+
+    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
+
+    for _ in range(T-1, -1, -1):
+        _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
+        _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
+        _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
+        _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
+        _dkv = _q[:, None] * _do[None, :]
+        _dui = _dkv * _k[:, None] * _v[None, :]
+        d_u += _dui
+
+        d_k_inner = d_h * _v[None, :] * _k[:, None]
+        tl.store(p_dk_aux, d_k_inner.to(p_dk_aux.dtype.element_ty), mask=mask_kv)
+
+        _dkv_hu = d_h + (_dkv * _u)
+        d_k = tl.sum(_dkv_hu * _v[None, :], axis=1)
+        d_v = tl.sum(_dkv_hu * _k[:, None], axis=0)
+
+        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
+        _w = tl.exp(_w)
+        d_h *= _w
+        d_h += _dkv
+
+        tl.store(p_dk, d_k.to(p_dk.dtype.element_ty), mask=mask_bk)
+        tl.store(p_dv, d_v.to(p_dv.dtype.element_ty), mask=mask_bv)
+
+        p_do += DV if REVERSE else -DV
+        p_q += DK if REVERSE else -DK
+        p_k += DK if REVERSE else -DK
+        p_v += DV if REVERSE else -DV
+        p_dk += DK if REVERSE else -DK
+        p_dk_aux += (DK if REVERSE else -DK) * DV
+        p_dv += DV if REVERSE else -DV
+        p_w += (DK if REVERSE else -DK) * DV
+
+    tl.store(p_du, d_u.to(p_du.dtype.element_ty), mask=mask_kv)
+
+
+@triton.jit
+def fused_recurrent_rwkv6_bwd_kernel_dkv(
+    # B: batch_size, H: n_heads, T: seq_len, D: d_head
+    # NV: number of split in the V dimension. NK: number of split in the K dimension
+    q,  # query [B, H, L, D_head_K]
+    k,  # key [B, H, L, D_head_V]
+    v,  # value [B, H, L, D_head_V]
+    w,  # log gate [B, H, L, D_head_K]
+    u,  # bonus [B, H, D_head_K]
+
+    do,  # gradient of output [B, H, L, D_head_V]
+    dk,
+    dk_aux,  # [B, H, L, D_head_K, D_head_V]
+    dv,
+    du,  # [H, D_head_K, D_head_V]
+
+    # initial hidden state initialization [B, H, D_head_K, D_head_V]
+    s_qk_h,  # stride size: L * D_head_K
+    s_qk_t,  # stride size: D_head_K
+    s_qk_d,  # stride size: 1
+
+    s_vo_h,  # stride size: L * D_head_V
+    s_vo_t,  # stride size: D_head_V
+    s_vo_d,  # stride size: 1
+
+    B,  # batch_size
+    H,  # n_heads
+    T,  # seq_len
+    scale,  # D_head_K ** -0.5
+    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
+    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
+    DK: tl.constexpr,  # D_head_K
+    DV: tl.constexpr,  # D_head_V
+    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
+    REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
+):
+    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_h = i_bh % H
+    p_q = q + i_bh * s_qk_h + i_k * BK + \
+        tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+    p_k = k + i_bh * s_qk_h + i_k * BK + \
+        tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+    p_do = do + i_bh * s_vo_h + i_v * BV + \
+        tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
+    p_v = v + i_bh * s_vo_h + i_v * BV + \
+        tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
+    p_dk = dk + (i_bh + i_v * B * H) * s_qk_h + i_k * \
+        BK + tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+    p_dv = dv + (i_bh + i_k * B * H) * s_vo_h + i_v * \
+        BV + tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
+
+    # vector W
+    # p_dk_aux = dk_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * \
+    #     BK + tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+    p_dk_aux = dk_aux + (i_bh + i_v * B * H) * s_qk_h * DV + \
+               (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+               (i_v * BV + tl.arange(0, BV)[None, :]) + \
+               ((T - 1) * DK * DV if not REVERSE else 0)
 
     # vector W
     # p_w = w + i_bh * s_qk_h + i_k * BK + \
@@ -500,6 +621,14 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dk_aux = dk_aux.sum(0)
 
         qscale = q*scale
+        # k:wt tensor([[[[0.9881],
+        #           [0.1146],
+        #           [0.1599],
+        #           [2.8859],
+        #           [0.8840],
+        #           [0.2017],
+        #           [0.0828],
+        #           [0.0000]]]]
         dw = (dq_aux * qscale)[:, :, 1:, ..., None] - (dk_aux)[:, :, 0:-1]
         # (b h n dk dv) -> (b h n (dk dv)) -> cumsum -> (b h n dk dv)
         dw = dw.reshape(*dw.shape[:-2], -1)
@@ -555,7 +684,7 @@ def fused_recurrent_rwkv6hypno(
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 8, 1, 4
+    B, H, L, K, V = 1, 1, 4, 1, 256
     def gen_inputs(): 
         th.manual_seed(17)
         device = "cuda"
