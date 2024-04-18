@@ -218,20 +218,22 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     # p_w = w + i_bh * s_qk_h + i_k * BK + \
     #     tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
     p_w = w + i_bh * s_qk_h * DV + \
-          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
-          (i_v * BV + tl.arange(0, BV)[None, :]) + \
+          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[:, None]) + \
           ((T - 1) * DK * DV if REVERSE else 0)
 
     # vector U
     # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
     p_u = u + i_h * DK * DV + \
-          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
-          (i_v * BV + tl.arange(0, BV)[None, :])
+          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[:, None])
 
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
-    mask_kv = mask_bk[:, None] & mask_bv[None, :]
-    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32).T
+    # FIXME: k[None], v[:, None] first
+    # mask_kv = mask_bk[:, None] & mask_bv[None, :]
+    mask_kv = mask_bk[None, :] & mask_bv[:, None]
+    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
     h = tl.zeros([BV, BK], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
@@ -245,7 +247,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _kv = _k[None, :] * _v[:, None]
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
-        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32).T
+        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
         _w = tl.exp(_w)
         h_q = h * _do[:, None]
         _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
