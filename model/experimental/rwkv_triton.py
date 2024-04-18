@@ -406,12 +406,13 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dv = dv.sum(0).to(v)
         dk_aux = dk_aux.sum(0)
 
-        dw = (dq_aux * q * scale)[:, :, 1:] - (dk_aux * k)[:, :, 0:-1]
+        qscale = q*scale
+        dw = (dq_aux * qscale)[:, :, 1:] - (dk_aux * k)[:, :, 0:-1]
         dw = torch.nn.functional.pad(dw, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
         dw = chunk_reversed_cumsum_fwd(dw).to(w)
 
-        # du = torch.einsum('bhnv,bhnk->hkv', do*v, q*k*scale)
-        du = ((do*dv)[:, :, :, None] * (k * q * scale)[..., None]).sum((0, 2)).to(u)
+        du = torch.einsum('bhnv,bhnk->hkv', do*v, qscale*k)
+        # du = ((do*dv)[:, :, :, None] * (k * q * scale)[..., None]).sum((0, 2)).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
 
 

@@ -23,7 +23,7 @@ from torch import Tensor
 
 from .rwkv_inner import rwkv_inner
 from .rwkv_triton import fused_recurrent_rwkv6hypno
-from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
+from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
 
 
 # fused_recurrent_rwkv6 = torch._dynamo.disable(fused_recurrent_rwkv6)
@@ -245,8 +245,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         w = time_decay.view(1,H,1,K)
         w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
-        w = -torch.exp(w) # log(exp(-exp))
-        
+        # w = -torch.exp(w) # log(exp(-exp))
+        w = (1e-4 + (1-1e-4) * (-w.exp()).exp()).log()
+
         if self.umat: 
             u = time_first.view(H,K,K)
             out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)

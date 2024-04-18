@@ -20,7 +20,7 @@ TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
 LOG_PROJECT = 'gptcore_memtention'
-LOG_NAME = 'RWKV6.0xFLA L8D512H2CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_Umat L8D512H2CM3Adam'
 
 cli.Config(
     seed_everything = 1337,
@@ -67,7 +67,7 @@ cli.Config(
             log_every_n_steps=20,
             logger = [
                 #lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                # lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
             #devices=1,
             #strategy='ddp',
