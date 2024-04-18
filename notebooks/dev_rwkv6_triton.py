@@ -66,7 +66,6 @@ from fla.utils import contiguous
 
 # on-the-fly computation without materializing hidden statets into HBMs
 
-
 @triton.jit
 def fused_recurrent_rwkv6_fwd_kernel(
     # B: batch_size, H: n_heads, T: seq_len, D: d_head
@@ -219,34 +218,34 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     # p_w = w + i_bh * s_qk_h + i_k * BK + \
     #     tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
     p_w = w + i_bh * s_qk_h * DV + \
-          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
-          (i_v * BV + tl.arange(0, BV)[:, None]) + \
+          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[None, :]) + \
           ((T - 1) * DK * DV if REVERSE else 0)
 
     # vector U
     # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
     p_u = u + i_h * DK * DV + \
-          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
-          (i_v * BV + tl.arange(0, BV)[:, None])
+          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[None, :])
 
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
-    mask_kvt = mask_bk[None, :] & mask_bv[:, None]
-    _u = tl.load(p_u, mask=mask_kvt, other=0).to(tl.float32).T
+    mask_kv = mask_bk[:, None] & mask_bv[None, :]
+    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32).T
     h = tl.zeros([BV, BK], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
         p_init_s = initial_state + i_bh * DK * DV + \
             (i_k * BK + tl.arange(0, BK)[None, :]) * \
             DV + (i_v * BV + tl.arange(0, BV)[:, None])
-        h += tl.load(p_init_s, mask=mask_kvt, other=0).to(tl.float32)
+        h += tl.load(p_init_s, mask=mask_kv, other=0).to(tl.float32)
 
     for _ in range(0, T):
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _kv = _k[None, :] * _v[:, None]
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
-        _w = tl.load(p_w, mask=mask_kvt, other=0).to(tl.float32)
+        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32).T
         _w = tl.exp(_w)
         h_q = h * _do[:, None]
         _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
@@ -262,6 +261,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         p_w += (-DK if REVERSE else DK) * DV
         p_dq += -DK if REVERSE else DK
         p_dq_aux += -DK if REVERSE else DK
+
 
 
 @triton.jit
@@ -553,7 +553,7 @@ def fused_recurrent_rwkv6hypno(
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 16, 8, 1
+    B, H, L, K, V = 1, 1, 8, 1, 4
     def gen_inputs(): 
         th.manual_seed(17)
         device = "cuda"
@@ -567,7 +567,7 @@ if __name__ == "__main__":
         return rt, kt, vt, wt, ut
     
     rt, kt, vt, wt, ut = gen_inputs()
-    w_ = wt[..., None].repeat(1, 1, 1, 1, V)
+    w_ = wt[..., None].repeat(1, 1, 1, 1, V).contiguous()
     w_ = -th.exp(w_)
     o = naive_recurrent_rwkv6_umat(rt, kt, vt, w_, ut)
     # print("naive kernel", o)
