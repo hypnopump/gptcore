@@ -628,6 +628,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         du = du.sum(0).to(u)
         dw = dw.sum(0).to(w)
 
+
         # du2 = th.einsum('bhnv,bhnk->hkv', do*v, qscale*k)
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
@@ -676,7 +677,7 @@ def fused_recurrent_rwkv6hypno(
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 4, 256, 1
+    B, H, L, K, V = 1, 1, 4, 1, 32
     def gen_inputs(): 
         th.manual_seed(17)
         device = "cuda"
