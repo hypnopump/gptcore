@@ -4,7 +4,7 @@
 
 from typing import Tuple
 
-import torch
+import torch as th
 import triton
 import triton.language as tl
 from torch.cuda.amp import custom_bwd, custom_fwd
@@ -226,7 +226,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     do,  # gradient of output [B, H, L, D_head_V]
     dk,
     dv,
-    du,  # [H, D_head_K, D_head_V]
 
     # initial hidden state initialization [B, H, D_head_K, D_head_V]
     s_qk_h,  # stride size: L * D_head_K
@@ -267,50 +266,41 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     # p_w = w + i_bh * s_qk_h + i_k * BK + \
     #     tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
     p_w = w + i_bh * s_qk_h * DV + \
-          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
-          (i_v * BV + tl.arange(0, BV)[:, None]) + \
+          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[None, :]) + \
           ((T - 1) * DK * DV if not REVERSE else 0)
 
-    winner = tl.zeros([BV, BK], dtype=tl.float32) + 1.0
-    s_cum = tl.zeros([BV, BK], dtype=tl.float32)
-    d_u = tl.zeros([BV, BK], dtype=tl.float32)
-    d_h = tl.zeros([BV, BK], dtype=tl.float32)
+    d_u = tl.zeros([BK, BV], dtype=tl.float32)
+    d_h = tl.zeros([BK, BV], dtype=tl.float32)
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
-    mask_kvt = mask_bk[:, None] & mask_bv[None, :]
-    mask_kv = mask_bk[None, :] & mask_bv[:, None]
+    mask_kv = mask_bk[:, None] & mask_bv[None, :]
 
     # vector U
     # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
     p_u = u + i_h * DK * DV + \
-        (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
-        (i_v * BV + tl.arange(0, BV)[:, None])
-    # in-loop gradient U contribution
-    p_du = du + i_bh * DK * DV + \
-        (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
-        (i_v * BV + tl.arange(0, BV)[:, None])
+        (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+        (i_v * BV + tl.arange(0, BV)[None, :])
 
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
 
-    for t in range(T-1, -1, -1):
+    for _ in range(T-1, -1, -1):
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
-
-        s = _k[None, :] * _v[:, None]
-        _dkv = _q[None, :] * _do[:, None]
-        _dui = _dkv * s
+        _dkv = _q[:, None] * _do[None, :]
+        _dui = _dkv * _k[:, None] * _v[None, :]
         d_u += _dui
-        s_cum += _q[None, :] * s
 
-        _dkv_hu = d_h + (_dkv * _u)
-        d_k = tl.sum(_dkv_hu * _v[:, None], axis=0)
-        d_v = tl.sum(_dkv_hu * _k[None, :], axis=1)
+        d_k = tl.sum(d_h * _v[None, :], axis=1)
+        # tl.store(p_dk_aux, d_k.to(p_dk_aux.dtype.element_ty), mask=mask_kv)
+
+        d_k += tl.sum(_dkv * _u * _v[None, :], axis=1)
+        d_v = tl.sum((d_h + (_dkv * _u)) * _k[:, None], axis=0)
 
         _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
         _w = tl.exp(_w)
-        winner *= _w
         d_h *= _w
         d_h += _dkv
 
@@ -325,9 +315,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         p_dv += DV if REVERSE else -DV
         p_w += (DK if REVERSE else -DK) * DV
 
-    tl.store(p_du, d_u.to(p_du.dtype.element_ty), mask=mask_kv)
-
-class FusedRecurrentRWKV6Function(torch.autograd.Function):
+class FusedRecurrentRWKV6Function(th.autograd.Function):
 
     @staticmethod
     @contiguous
@@ -347,7 +335,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         num_warps = 1
 
         o = q.new_empty(NK, batch_size, n_heads, seq_len,
-                        d_head_v, dtype=torch.float32)
+                        d_head_v, dtype=th.float32)
 
         if output_final_state:
             final_state = q.new_empty(batch_size, n_heads, d_head_qk, d_head_v)
@@ -392,12 +380,11 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         num_stages = 1
         num_warps = 1
         dq = q.new_empty(NV, batch_size, n_heads,  seq_len,
-                         d_head_qk, dtype=torch.float32)
-        dq_aux = torch.empty_like(dq)
+                         d_head_qk, dtype=th.float32)
         grid = (NV, NK, batch_size * n_heads)
 
         fused_recurrent_rwkv6_bwd_kernel_dq[grid](
-            k, v, w, u, do, dq, dq_aux, initial_state,
+            k, v, w, u, do, dq, initial_state,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
             batch_size, n_heads, seq_len, scale,
@@ -408,63 +395,60 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             REVERSE=ctx.reverse,
         )
         dq = dq.sum(0).to(q)
-        dq_aux = dq_aux.sum(0)
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), 32)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
         dk = q.new_empty(NV, batch_size, n_heads,  seq_len,
-                         d_head_qk, dtype=torch.float32)
+                         d_head_qk, dtype=th.float32)
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
-                         d_head_v, dtype=torch.float32)
-        du = q.new_empty(NV, n_heads, d_head_qk, d_head_v, dtype=torch.float32)
+                         d_head_v, dtype=th.float32)
 
-        # grid = (NV, NK, batch_size * n_heads)
-        #
-        # fused_recurrent_rwkv6_bwd_kernel_dkv[grid](
-        #     q, k, v, w, u, do, dk, dv, du,
-        #     q.stride(1), q.stride(2), q.stride(3),
-        #     v.stride(1), v.stride(2), v.stride(3),
-        #     batch_size, n_heads, seq_len, scale,
-        #     DK=d_head_qk, DV=d_head_v, BK=BK, BV=BV,
-        #     num_warps=num_warps,
-        #     num_stages=num_stages,
-        #     USE_INITIAL_STATE=initial_state is not None,
-        #     REVERSE=ctx.reverse,
-        # )
+        grid = (NV, NK, batch_size * n_heads)
+
+        fused_recurrent_rwkv6_bwd_kernel_dkv[grid](
+            q, k, v, w, u, do, dk, dv,
+            q.stride(1), q.stride(2), q.stride(3),
+            v.stride(1), v.stride(2), v.stride(3),
+            batch_size, n_heads, seq_len, scale,
+            DK=d_head_qk, DV=d_head_v, BK=BK, BV=BV,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            USE_INITIAL_STATE=initial_state is not None,
+            REVERSE=ctx.reverse,
+        )
         dk = dk.sum(0).to(k)
         dv = dv.sum(0).to(v)
-        du = du.sum(0).to(u)
 
         # DW outside loops
-        dw = torch.zeros_like(w)
+        dw = th.zeros_like(w)
         # el primer w multiplica el estado de 0s y no hace nada.
         # el ultimo multiplica un estado que no se usa y no hace nada.
-        doq = torch.einsum('bhid,bhic->bhicd', do, q)
-        kv_ = torch.einsum('bhic,bhid->bhicd', k, v)
+        doq = th.einsum('bhid,bhic->bhicd', do, q)
+        kv_ = th.einsum('bhic,bhid->bhicd', k, v)
         for i in range(1, seq_len - 1):
             for j in range(i, seq_len - 1):
                 wcum = w[:, :, i:j + 1].sum(dim=2).exp()
-                delta = torch.einsum('bhcd,bhcd,bhcd->bhcd', doq[:, :, j + 1], kv_[:, :, i - 1], wcum)
+                delta = th.einsum('bhcd,bhcd,bhcd->bhcd', doq[:, :, j + 1], kv_[:, :, i - 1], wcum)
                 dw[:, :, i:j + 1] += delta[:, :, None]
-        du2 = th.einsum('bhnv,bhnk->hkv', do*v, qscale*k)
+        du = th.einsum('bhnv,bhnk->hkv', do*v, q*scale*k)
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
 
 
 # if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
 def fused_recurrent_rwkv6hypno(
-    r: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    w: torch.Tensor,
-    u: torch.Tensor,
+    r: th.Tensor,
+    k: th.Tensor,
+    v: th.Tensor,
+    w: th.Tensor,
+    u: th.Tensor,
     scale: int = -1,
-    initial_state: torch.Tensor = None,
+    initial_state: th.Tensor = None,
     output_final_state: bool = False,
     causal: bool = True
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[th.Tensor, th.Tensor]:
     r"""
     Args:
         r (torch.Tensor):

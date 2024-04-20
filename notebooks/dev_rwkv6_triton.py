@@ -272,7 +272,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     do,  # gradient of output [B, H, L, D_head_V]
     dk,
     dv,
-    du,  # [H, D_head_K, D_head_V]
 
     # initial hidden state initialization [B, H, D_head_K, D_head_V]
     s_qk_h,  # stride size: L * D_head_K
@@ -328,10 +327,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     p_u = u + i_h * DK * DV + \
         (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
         (i_v * BV + tl.arange(0, BV)[None, :])
-    # in-loop gradient U contribution
-    p_du = du + i_bh * DK * DV + \
-        (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
-        (i_v * BV + tl.arange(0, BV)[None, :])
 
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
 
@@ -365,8 +360,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         p_dk += DK if REVERSE else -DK
         p_dv += DV if REVERSE else -DV
         p_w += (DK if REVERSE else -DK) * DV
-
-    tl.store(p_du, d_u.to(p_du.dtype.element_ty), mask=mask_kv)
 
 class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
@@ -457,12 +450,11 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
                          d_head_qk, dtype=torch.float32)
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
                          d_head_v, dtype=torch.float32)
-        du = q.new_empty(NV, NK, n_heads, d_head_qk, d_head_v, dtype=torch.float32)
 
         grid = (NV, NK, batch_size * n_heads)
 
         fused_recurrent_rwkv6_bwd_kernel_dkv[grid](
-            q, k, v, w, u, do, dk, dv, du,
+            q, k, v, w, u, do, dk, dv,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
             batch_size, n_heads, seq_len, scale,
@@ -474,7 +466,6 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         )
         dk = dk.sum(0).to(k)
         dv = dv.sum(0).to(v)
-        du = du.sum((0, 1)).to(u)
 
         # DW outside loops
         dw = th.zeros_like(w)
