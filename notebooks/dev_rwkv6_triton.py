@@ -52,11 +52,11 @@ def naive_recurrent_rwkv6_umat(
 
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2024, Songlin Yang, Eric Alcaide
+# Copyright (c) 2024, Songlin Yang
 
 from typing import Tuple
 
-import torch as th
+import torch
 import triton
 import triton.language as tl
 from torch.cuda.amp import custom_bwd, custom_fwd
@@ -177,7 +177,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 
     do,  # gradient of output [B, H, L, D_head_V]
     dq,  # gradient of query [NV, B, H, L, D_head_K]
-    dq_aux,  # gradient of query_aux [NV, B, H, L, D_head_K]
 
     # initial hidden state initialization [B, H, D_head_K, D_head_V]
     initial_state,
@@ -210,8 +209,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     p_do = do + i_bh * s_vo_h + i_v * BV + \
         tl.arange(0, BV) + ((T-1) * DV if REVERSE else 0)
     p_dq = dq + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
-    p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
         tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
 
     # vector W
@@ -252,17 +249,14 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         h_q = h * _do[:, None]
         _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
         _dq *= scale
-        _dq_aux = tl.sum(h_q, axis=0)
         h = h * _w
         h += _kv
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
-        tl.store(p_dq_aux, _dq_aux.to(p_dq_aux.dtype.element_ty), mask=mask_bk)
         p_k += -DK if REVERSE else DK
         p_do += -DV if REVERSE else DV
         p_v += -DV if REVERSE else DV
         p_w += (-DK if REVERSE else DK) * DV
         p_dq += -DK if REVERSE else DK
-        p_dq_aux += -DK if REVERSE else DK
 
 
 @triton.jit
@@ -367,7 +361,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         p_dv += DV if REVERSE else -DV
         p_w += (DK if REVERSE else -DK) * DV
 
-class FusedRecurrentRWKV6Function(th.autograd.Function):
+
+class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
     @staticmethod
     @contiguous
@@ -387,7 +382,7 @@ class FusedRecurrentRWKV6Function(th.autograd.Function):
         num_warps = 1
 
         o = q.new_empty(NK, batch_size, n_heads, seq_len,
-                        d_head_v, dtype=th.float32)
+                        d_head_v, dtype=torch.float32)
 
         if output_final_state:
             final_state = q.new_empty(batch_size, n_heads, d_head_qk, d_head_v)
@@ -432,11 +427,11 @@ class FusedRecurrentRWKV6Function(th.autograd.Function):
         num_stages = 1
         num_warps = 1
         dq = q.new_empty(NV, batch_size, n_heads,  seq_len,
-                         d_head_qk, dtype=th.float32)
+                         d_head_qk, dtype=torch.float32)
         grid = (NV, NK, batch_size * n_heads)
 
         fused_recurrent_rwkv6_bwd_kernel_dq[grid](
-            q, k, v, w, u, do, dq, initial_state,
+            k, v, w, u, do, dq, initial_state,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
             batch_size, n_heads, seq_len, scale,
@@ -453,9 +448,9 @@ class FusedRecurrentRWKV6Function(th.autograd.Function):
         num_stages = 1
         num_warps = 1
         dk = q.new_empty(NV, batch_size, n_heads,  seq_len,
-                         d_head_qk, dtype=th.float32)
+                         d_head_qk, dtype=torch.float32)
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
-                         d_head_v, dtype=th.float32)
+                         d_head_v, dtype=torch.float32)
 
         grid = (NV, NK, batch_size * n_heads)
 
@@ -491,16 +486,16 @@ class FusedRecurrentRWKV6Function(th.autograd.Function):
 
 # if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
 def fused_recurrent_rwkv6hypno(
-    r: th.Tensor,
-    k: th.Tensor,
-    v: th.Tensor,
-    w: th.Tensor,
-    u: th.Tensor,
+    r: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
     scale: int = -1,
-    initial_state: th.Tensor = None,
+    initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     causal: bool = True
-) -> Tuple[th.Tensor, th.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         r (torch.Tensor):
