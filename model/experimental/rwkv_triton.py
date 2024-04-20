@@ -384,7 +384,7 @@ class FusedRecurrentRWKV6Function(th.autograd.Function):
         grid = (NV, NK, batch_size * n_heads)
 
         fused_recurrent_rwkv6_bwd_kernel_dq[grid](
-            k, v, w, u, do, dq, initial_state,
+            q, k, v, w, u, do, dq, initial_state,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
             batch_size, n_heads, seq_len, scale,
