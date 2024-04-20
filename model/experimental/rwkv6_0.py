@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .rwkv_inner import rwkv_inner
-from .rwkv_triton import fused_recurrent_rwkv6hypno
+from .rwkv_triton_v7 import fused_recurrent_rwkv6hypno
 from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
 
 
@@ -260,7 +260,6 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             # w = -torch.exp(w) # log(exp(-exp))
             w = (1e-4 + (1 - 1e-4) * (-w.exp()).exp()).log()
 
-        breakpoint()
         if self.umat:
             u = time_first.view(H,K,V)
             out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)

@@ -62,8 +62,12 @@ def fused_recurrent_rwkv6_fwd_kernel(
         tl.arange(0, BV) + ((T-1) * DV if REVERSE else 0)
 
     # vector W
-    p_w = w + i_bh * s_qk_h + i_k * BK + \
-       tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+    # p_w = w + i_bh * s_qk_h + i_k * BK + \
+    #    tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+    p_w = w + i_bh * s_qk_h * DV + \
+          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[:, None]) + \
+          ((T - 1) * DK * DV if REVERSE else 0)
 
     # vector U
     # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
@@ -89,8 +93,8 @@ def fused_recurrent_rwkv6_fwd_kernel(
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
-        _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
-        _w = tl.exp(_w)[None, :]
+        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
+        _w = tl.exp(_w)
         _kv = _k[None, :] * _v[:, None]
         _o = (h + _kv * _u) * _q[None, :]
         _o = tl.sum(_o, axis=1)
@@ -101,7 +105,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
         p_k += -DK if REVERSE else DK
         p_o += -DV if REVERSE else DV
         p_v += -DV if REVERSE else DV
-        p_w += -DK if REVERSE else DK
+        p_w += (-DK if REVERSE else DK) * DV
 
     if STORE_FINAL_STATE:
         p_final_s = final_state + i_bh * DK * DV + \
@@ -158,12 +162,20 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
 
     # vector W
-    p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+    # p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
+    #     tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+    p_dq_aux = dq_aux + (i_v * DK * B * H * DK + i_k * B * H + i_bh) * s_qk_h * DV + \
+               (i_k * BK + tl.arange(0, BK))[None, :] * DV + \
+               (i_v * BV + tl.arange(0, BV))[:, None] + \
+               ((T - 1) * DK * DV if REVERSE else 0)
 
     # vector W
-    p_w = w + i_bh * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+    # p_w = w + i_bh * s_qk_h + i_k * BK + \
+    #     tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+    p_w = w + i_bh * s_qk_h * DV + \
+          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[:, None]) + \
+          ((T - 1) * DK * DV if REVERSE else 0)
 
     # vector U
     # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
@@ -190,12 +202,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _kv = _k[None, :] * _v[:, None]
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
-        _w = tl.load(p_w, mask=mask_bv, other=0).to(tl.float32)
-        _w = tl.exp(_w)[None, :]
+        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
+        _w = tl.exp(_w)
         h_q = h * _do[:, None]
         _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
         _dq *= scale
-        _dq_aux = tl.sum(h_q, axis=0)  # sum along values
+        _dq_aux = h_q
         h = h * _w
         h += _kv
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
@@ -206,7 +218,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         p_v += -DV if REVERSE else DV
         p_w += (-DK if REVERSE else DK) * DV
         p_dq += -DK if REVERSE else DK
-        p_dq_aux += -DK if REVERSE else DK
+        p_dq_aux += (-DK if REVERSE else DK) * DV
 
 
 @triton.jit
