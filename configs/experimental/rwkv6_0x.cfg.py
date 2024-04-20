@@ -17,7 +17,7 @@ import model.experimental.rwkv6_0
 BATCH_SIZE = 8
 VOCAB_SIZE = 50304
 TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
-MAX_SEQUENCE_LENGTH = 1024
+MAX_SEQUENCE_LENGTH = 256
 
 LOG_PROJECT = 'gptcore_memtention'
 LOG_NAME = 'RWKV6.0xFLA_Umat L8D512H2CM3Adam'
@@ -32,8 +32,8 @@ cli.Config(
             vocab_size = VOCAB_SIZE,
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
-            n_layer=8,
-            n_head=2,
+            n_layer=2,
+            n_head=8,
             d_model=512,
 
             feedforward_d_model_ratio=3,
@@ -66,8 +66,8 @@ cli.Config(
             gradient_clip_val=0.5,
             log_every_n_steps=20,
             logger = [
-                #lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                # lightning.pytorch.loggers.CSVLogger(save_dir="."),
+                # lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
             #devices=1,
             #strategy='ddp',

@@ -105,6 +105,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         args = RWKVConfig(hparams)
         self.umat = True
+        self.wmat = True
 
         self.args = args
         self.layer_id = layer_id
@@ -142,19 +143,24 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
             # fancy time_decay
             k_dim_att = args.n_kv_head * self.k_head_size
-            decay_speed = torch.ones(k_dim_att)
+            decay_speed = torch.ones(k_dim_att, self.v_head_size)
             for n in range(k_dim_att):
                 decay_speed[n] = -6 + 5 * (n / max(k_dim_att - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
-            self.time_decay = nn.Parameter(decay_speed.reshape(self.n_kv_head, self.k_head_size)) # (KVH, K)
+
+            time_decay = decay_speed.reshape(self.n_kv_head, self.k_head_size, self.v_head_size) # (KVH, K, V)
+            if self.wmat:
+                self.time_decay = nn.Parameter(time_decay)  # (KVH, K, V)
+            else:
+                self.time_decay = nn.Parameter(time_decay[..., 0])  # (KVH, K)
             # print(layer_id, self.time_decay.flatten()[:3].cpu().numpy(), '...', self.time_decay.flatten()[-3:].cpu().numpy())
 
-            tmp = torch.zeros(k_dim_att, self.k_head_size)
+            tmp = torch.zeros(k_dim_att, self.v_head_size)
             for n in range(k_dim_att):
                 zigzag = ((n + 1) % 3 - 1) * 0.1
                 tmp[n] = ratio_0_to_1 * (1 - (n / max(k_dim_att - 1, 1))) + zigzag
                 tmp[n, :] += torch.randn_like(tmp[n, :]) * 1e-4
 
-            time_first = tmp.reshape(self.n_kv_head, self.k_head_size, self.k_head_size)
+            time_first = tmp.reshape(self.n_kv_head, self.k_head_size, self.v_head_size)
             if self.umat:
                 self.time_first = nn.Parameter(time_first) # (KVH, K, K)
             else: 
@@ -243,13 +249,20 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         # if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
         #     kv_state = kv_state.contiguous().to(torch.bfloat16)
 
-        w = time_decay.view(1,H,1,K)
-        w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2) # BHTK
-        # w = -torch.exp(w) # log(exp(-exp))
-        w = (1e-4 + (1-1e-4) * (-w.exp()).exp()).log()
+        if self.wmat:
+            w = time_decay.view(1, H, 1, K, V)
+            w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2) # BHTK
+            # w = -torch.exp(w) # log(exp(-exp))
+            w = (1e-4 + (1-1e-4) * (-w.exp()).exp()).log()
+        else:
+            w = time_decay.view(1, H, 1, K)
+            w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
+            # w = -torch.exp(w) # log(exp(-exp))
+            w = (1e-4 + (1 - 1e-4) * (-w.exp()).exp()).log()
 
-        if self.umat: 
-            u = time_first.view(H,K,K)
+        breakpoint()
+        if self.umat:
+            u = time_first.view(H,K,V)
             out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)
         else:
             u = time_first.view(H,K)
@@ -262,6 +275,6 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         out = self.output(out * g)
 
         if n_padding != 0:
-            out = out[..., :-n_padding, :] # BTC
+            out = out[..., :-n_padding, :]  # BTC
 
         return out
