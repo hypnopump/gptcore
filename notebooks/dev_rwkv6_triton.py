@@ -490,13 +490,16 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         du = du.sum(0).to(u)
 
         # DW outside loops
+        dw = th.zeros_like(w)
+        # el primer w multiplica el estado de 0s y no hace nada.
+        # el ultimo multiplica un estado que no se usa y no hace nada.
         doq = th.einsum('bhid,bhic->bhicd', do, q)
-        doq = doq.flip((2,)).cumsum(dim=2).flip((2,))
-        doq = F.pad(doq, (0, 0, 0, 0, -1, 1))
-        wkv = th.einsum('bhicd,bhic,bhid->bhicd', w.cumsum(dim=2).exp(), k, v)  # h (guardar durante fw)
-        dw = th.einsum('bhicd,bhicd->bhicd', doq, wkv)
-        dw = dw.flip((2,)).cumsum(dim=2).flip((2,))
-
+        kv_ = th.einsum('bhic,bhid->bhicd', k, v)
+        for i in range(1, seq_len - 1):
+            for j in range(i, seq_len - 1):
+                wcum = w[:, :, i:j + 1].sum(dim=2).exp()
+                delta = th.einsum('bhcd,bhcd,bhcd->bhcd', doq[:, :, j + 1], kv_[:, :, i - 1], wcum)
+                dw[:, :, i:j + 1] += delta[:, :, None]
         # du2 = th.einsum('bhnv,bhnk->hkv', do*v, qscale*k)
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
