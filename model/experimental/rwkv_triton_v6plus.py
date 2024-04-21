@@ -171,7 +171,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
     mask_kv = mask_bk[:, None] & mask_bv[None, :]
-    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
+    _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32).T
     h = tl.zeros([BV, BK], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
@@ -188,7 +188,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
         _w = tl.exp(_w)
         h_q = h * _do[:, None]
-        _dq = tl.sum(h_q + _kv * _u.T * _do[:, None], axis=0)
+        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
         _dq *= scale
         _dq_aux = tl.sum(h_q, axis=0)
         h = h * _w[None, :]

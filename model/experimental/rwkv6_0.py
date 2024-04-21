@@ -23,7 +23,7 @@ from torch import Tensor
 
 from .rwkv_inner import rwkv_inner
 # supports Umat, not Wmat
-from .rwkv_triton import fused_recurrent_rwkv6hypno
+from .rwkv_triton_v6plus import fused_recurrent_rwkv6hypno
 # supports both Umat and Wmat
 from .rwkv_triton_v7 import fused_recurrent_rwkv7hypno
 # base RWKV6. chunked is significantly faster (80ktok/s vs 50ktok/s on uncompiled L8D512H8; seq_len=1024; A100)
