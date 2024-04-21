@@ -30,6 +30,7 @@ cd Desktop/projects/gptcore_private/
 pip install -r requirements.txt
 pip install lightning deepspeed einops transformers datasets wandb torchdata schedulefree
 pip install triton==2.3.0 matplotlib
+# commit: 904708643a7d018a9cc71c60159ed4bc597ae307 # last tested
 pip install -e flash-linear-attention/.
 
 wandb login
