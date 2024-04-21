@@ -20,7 +20,7 @@ TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
 LOG_PROJECT = 'gptcore_memtention'
-LOG_NAME = 'RWKV6.0xFLA_Umat_k=1-w L8D512H2CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_Umat_k=1-w_NoMixOp L8D512H2CM3Adam'
 
 cli.Config(
     seed_everything = 1337,
@@ -47,6 +47,7 @@ cli.Config(
             self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
             #feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
             feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+            # residual_op_factory=lambda: model.core.ResidualAddOp(),
         ),
     ),
 
