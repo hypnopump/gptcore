@@ -451,9 +451,15 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
         # FIXME: beware we have indexing problems and
         # FIXME: this numbers determine the max head size we can take
-        BB_DV = BB = 32
+        BB_DK_QBW = 16
+        BB_DV_QBW = 32
+        BB_DK_DKDV = 32
+        BB_DV_DKDV = 32
 
-        BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB_DV)
+        # BB_DK_QBW = BB_DK_QBW = BB_DV_QBW = BB_DV_DKDV = 32
+
+
+        BK, BV = min(triton.next_power_of_2(d_head_qk), BB_DK_QBW), min(triton.next_power_of_2(d_head_v), BB_DV_QBW)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
@@ -475,9 +481,10 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             REVERSE=ctx.reverse,
         )
         dq = dq.sum(0).to(q)
-        dq_aux = dq_aux.sum((0, 1)).to(w) * scale
+        dq_aux *= scale
+        dq_aux = dq_aux.sum((0, 1)).to(w)
 
-        BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), BB)
+        BK, BV = min(triton.next_power_of_2(d_head_qk), BB_DK_DKDV), min(triton.next_power_of_2(d_head_v), BB_DV_DKDV)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
