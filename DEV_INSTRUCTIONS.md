@@ -18,7 +18,7 @@ sudo docker run -td --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=671
 sudo docker ps
 sudo nvidia-smi -lgc 210,1500
 
-export CONTAINER_NAME="affectionate_curran"
+export CONTAINER_NAME="pensive_swirles"
 sudo docker exec -it $CONTAINER_NAME /bin/bash
 
 # sudo docker kill $CONTAINER_NAME 
@@ -33,12 +33,10 @@ pip install triton==2.3.0 matplotlib
 # commit: 904708643a7d018a9cc71c60159ed4bc597ae307 # last tested
 pip install -e flash-linear-attention/.
 
-wandb login
-
 apt-get update
 apt-get install -y tmux
 
-
+wandb login
 
 ```
 * WARNING! I had bad experiences with docker, runs being killed without warning (whole container killed)

@@ -3,7 +3,7 @@ import torch as th
 import torch.nn.functional as F
 
 from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
-from fla.ops.rwkv6.chunked import chunk_rwkv6
+from fla.ops.rwkv6.chunk import chunk_rwkv6
 # from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
 
 
@@ -200,7 +200,7 @@ def test_rwkv():
             # [1 * 1024, 4 * 512, 4 * 1], 
         ],
         line_arg="method",
-        line_vals=["torch_chunked", "triton_recurrent", "triton_chunked"],
+        line_vals=["torch", "triton_recurrent", "triton_chunked"],
         line_names=["Torch", "Triton Recurrent", "Triton Chunked"],
         styles=[("red", "-"), ("green", "-"), ("blue", "-")],
         ylabel="time, ms",
