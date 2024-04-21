@@ -273,7 +273,6 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         if self.umat:
             u = time_first.view(H,K,V)
             if self.wmat:
-                breakpoint()
                 out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, kv_state)
             else:
                 out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)
@@ -281,9 +280,6 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             u = time_first.view(H,K)
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
             out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)
-
-        print("o", out)
-        breakpoint()
 
         out = out.transpose(1,2).reshape(B*T, H*V)
         out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)

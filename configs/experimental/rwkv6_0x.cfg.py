@@ -20,7 +20,7 @@ TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
 LOG_PROJECT = 'gptcore_memtention'
-LOG_NAME = 'RWKV6.0xFLA_Umat_k=1-w_NoMixOp L8D512H2CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_UWmat L8D512H8CM3Adam'
 
 cli.Config(
     seed_everything = 1337,
@@ -32,7 +32,7 @@ cli.Config(
             vocab_size = VOCAB_SIZE,
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
-            n_layer=1,
+            n_layer=8,
             n_head=8,
             d_model=512,
 

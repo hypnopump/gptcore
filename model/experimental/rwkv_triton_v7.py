@@ -400,8 +400,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         # FIXME: beware we have indexing problems and
         # FIXME: this numbers determine the max head size we can take
         # FIXME: original numbers were BB = 32, BB_DV = 64
-        BB_DV = 32
-        BB = 32
+        BB_DV = 16
+        BB = 16
 
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB_DV)
@@ -410,7 +410,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         num_warps = 1
         dq = q.new_empty(NV, batch_size, n_heads,  seq_len,
                          d_head_qk, dtype=torch.float32)
-        dq_aux = w.new_empty(NV, NK, batch_size, n_heads, seq_len,
+        dq_aux = w.new_zeros(NV, NK, batch_size, n_heads, seq_len,
                              d_head_qk, d_head_v, dtype=torch.float32)
         grid = (NV, NK, batch_size * n_heads)
 
@@ -437,7 +437,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
                          d_head_qk, dtype=torch.float32)
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
                          d_head_v, dtype=torch.float32)
-        dk_aux = w.new_empty(NV, NK, batch_size, n_heads, seq_len,
+        dk_aux = w.new_zeros(NV, NK, batch_size, n_heads, seq_len,
                              d_head_qk, d_head_v, dtype=torch.float32)
 
         grid = (NV, NK, batch_size * n_heads)
@@ -464,7 +464,6 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dw = dw.reshape(batch_size, n_heads, seq_len, -1)
         dw = chunk_reversed_cumsum_fwd(dw).to(w)
         dw = dw.reshape(batch_size, n_heads, seq_len, d_head_qk, d_head_v)
-
         # first W multiplies an empty state
         if initial_state is None:
             dw[:, :, 0] = 0.
@@ -472,7 +471,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         du = th.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)  # way slower
 
-        dq, dk, dv, dw = map(lambda x: th.ones_like(x).mul_(1e-7).to(q.dtype), (dq, dk, dv, dw))
+        # dw = th.ones_like(dw).mul_(1e-7).to(q.dtype)
         return dq, dk, dv, dw, du, None, None, None, None
 
 

@@ -8,13 +8,13 @@ from fla.ops.rwkv6.recurrent_naive import naive_recurrent_rwkv6
 
 
 def naive_recurrent_rwkv6_umat(
-    q: th.Tensor,
-    k: th.Tensor,
-    v: th.Tensor,
-    w: th.Tensor,
-    u: th.Tensor,
-    initial_state=None,
-    output_final_state=False
+        q: th.Tensor,
+        k: th.Tensor,
+        v: th.Tensor,
+        w: th.Tensor,
+        u: th.Tensor,
+        initial_state=None,
+        output_final_state=False
 ):
     """ Inputs:
     * q, k: (B, H, L, K)
@@ -45,11 +45,6 @@ def naive_recurrent_rwkv6_umat(
     return o.to(orig_dtype)
 
 
-
-
-
-
-
 # -*- coding: utf-8 -*-
 
 # Copyright (c) 2024, Songlin Yang, Eric Alcaide
@@ -64,53 +59,54 @@ from torch.cuda.amp import custom_bwd, custom_fwd
 from fla.ops.utils import chunk_reversed_cumsum_fwd
 from fla.utils import contiguous
 
+
 # on-the-fly computation without materializing hidden statets into HBMs
 
 @triton.jit
 def fused_recurrent_rwkv6_fwd_kernel(
-    # B: batch_size, H: n_heads, T: seq_len, D: d_head
-    q,  # query [B, H, L, D_head_K]
-    k,  # key [B, H, L, D_head_K]
-    v,  # value [B, H, L, D_head_V]
-    w,  # log gate [B, H, L, D_head_K, D_head_V]
-    u,  # bonus [B, H, D_head_K, D_head_V]
-    o,  # output [B, H, L, D_head_V]
-    # initial hidden state initialization [B, H, D_head_K, D_head_V]
-    initial_state,
-    final_state,  # final hidden state [B, H, D_head_K, D_head_V]
+        # B: batch_size, H: n_heads, T: seq_len, D: d_head
+        q,  # query [B, H, L, D_head_K]
+        k,  # key [B, H, L, D_head_K]
+        v,  # value [B, H, L, D_head_V]
+        w,  # log gate [B, H, L, D_head_K, D_head_V]
+        u,  # bonus [B, H, D_head_K, D_head_V]
+        o,  # output [B, H, L, D_head_V]
+        # initial hidden state initialization [B, H, D_head_K, D_head_V]
+        initial_state,
+        final_state,  # final hidden state [B, H, D_head_K, D_head_V]
 
-    s_qk_h,  # stride size: L * D_head_K
-    s_qk_t,  # stride size: D_head_K
-    s_qk_d,  # stride size: 1
+        s_qk_h,  # stride size: L * D_head_K
+        s_qk_t,  # stride size: D_head_K
+        s_qk_d,  # stride size: 1
 
-    s_vo_h,  # stride size: L * D_head_V
-    s_vo_t,  # stride size: D_head_V
-    s_vo_d,  # stride size: 1
+        s_vo_h,  # stride size: L * D_head_V
+        s_vo_t,  # stride size: D_head_V
+        s_vo_d,  # stride size: 1
 
-    B,  # batch size
-    H,  # n_heads
-    T,  # seq_len
-    scale,  # D_head_K ** -0.5
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
-    DK: tl.constexpr,  # D_head_K
-    DV: tl.constexpr,  # D_head_V
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-    REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
+        B,  # batch size
+        H,  # n_heads
+        T,  # seq_len
+        scale,  # D_head_K ** -0.5
+        BK: tl.constexpr,  # BLOCK SIZE along the K dimension
+        BV: tl.constexpr,  # BLOCK SIZE along the V dimension
+        DK: tl.constexpr,  # D_head_K
+        DV: tl.constexpr,  # D_head_V
+        USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
+        STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
+        REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
 ):
     # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
 
     p_q = q + i_bh * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+          tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
     p_k = k + i_bh * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+          tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
     p_v = v + i_bh * s_vo_h + i_v * BV + \
-        tl.arange(0, BV) + ((T-1) * DV if REVERSE else 0)
+          tl.arange(0, BV) + ((T - 1) * DV if REVERSE else 0)
     p_o = o + (i_bh + i_k * B * H) * s_vo_h + i_v * BV + \
-        tl.arange(0, BV) + ((T-1) * DV if REVERSE else 0)
+          tl.arange(0, BV) + ((T - 1) * DV if REVERSE else 0)
 
     # vector W
     # p_w = w + i_bh * s_qk_h + i_k * BK + \
@@ -135,8 +131,8 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
     if USE_INITIAL_STATE:
         p_init_s = initial_state + i_bh * DK * DV + \
-            (i_k * BK + tl.arange(0, BK)[None, :]) * \
-            DV + (i_v * BV + tl.arange(0, BV)[:, None])
+                   (i_k * BK + tl.arange(0, BK)[None, :]) * \
+                   DV + (i_v * BV + tl.arange(0, BV)[:, None])
         h += tl.load(p_init_s, mask=mask_kv, other=0).to(tl.float32)
 
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
@@ -160,57 +156,57 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
     if STORE_FINAL_STATE:
         p_final_s = final_state + i_bh * DK * DV + \
-            (i_k * BK + tl.arange(0, BK)[None, :]) * \
-            DV + (i_v * BV + tl.arange(0, BV)[:, None])
+                    (i_k * BK + tl.arange(0, BK)[None, :]) * \
+                    DV + (i_v * BV + tl.arange(0, BV)[:, None])
         tl.store(p_final_s, h.to(p_final_s.dtype.element_ty), mask=mask_kv)
 
 
 # Similar to Algorithm1 of https://arxiv.org/abs/2006.16236
 @triton.jit
 def fused_recurrent_rwkv6_bwd_kernel_dq(
-    # B: batch_size, H: n_heads, T: seq_len, D: d_head
-    # NV: number of split in the V dimension. NK: number of split in the K dimension
-    k,  # key [B, H, L, D_head_V]
-    v,  # value [B, H, L, D_head_V]
-    w,  # log gate [B, H, L, D_head_K]
-    u,  # bonus [B, H, D_head_K, D_head_V]
+        # B: batch_size, H: n_heads, T: seq_len, D: d_head
+        # NV: number of split in the V dimension. NK: number of split in the K dimension
+        k,  # key [B, H, L, D_head_V]
+        v,  # value [B, H, L, D_head_V]
+        w,  # log gate [B, H, L, D_head_K]
+        u,  # bonus [B, H, D_head_K, D_head_V]
 
-    do,  # gradient of output [B, H, L, D_head_V]
-    dq,  # gradient of query [NV, B, H, L, D_head_K]
-    dq_aux,  # gradient of query_aux [NV, B, H, L, D_head_K, D_head_V]
+        do,  # gradient of output [B, H, L, D_head_V]
+        dq,  # gradient of query [NV, B, H, L, D_head_K]
+        dq_aux,  # gradient of query_aux [NV, B, H, L, D_head_K, D_head_V]
 
-    # initial hidden state initialization [B, H, D_head_K, D_head_V]
-    initial_state,
+        # initial hidden state initialization [B, H, D_head_K, D_head_V]
+        initial_state,
 
-    s_qk_h,  # stride size: L * D_head_K
-    s_qk_t,  # stride size: D_head_K
-    s_qk_d,  # stride size: 1
+        s_qk_h,  # stride size: L * D_head_K
+        s_qk_t,  # stride size: D_head_K
+        s_qk_d,  # stride size: 1
 
-    s_vo_h,  # stride size: L * D_head_V
-    s_vo_t,  # stride size: D_head_V
-    s_vo_d,  # stride size: 1
+        s_vo_h,  # stride size: L * D_head_V
+        s_vo_t,  # stride size: D_head_V
+        s_vo_d,  # stride size: 1
 
-    B,  # batch_size
-    H,  # n_heads
-    T,  # seq_len
-    scale,  # D_head_K ** -0.5
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
-    DK: tl.constexpr,  # D_head_K
-    DV: tl.constexpr,  # D_head_V
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
+        B,  # batch_size
+        H,  # n_heads
+        T,  # seq_len
+        scale,  # D_head_K ** -0.5
+        BK: tl.constexpr,  # BLOCK SIZE along the K dimension
+        BV: tl.constexpr,  # BLOCK SIZE along the V dimension
+        DK: tl.constexpr,  # D_head_K
+        DV: tl.constexpr,  # D_head_V
+        USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
+        REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
     p_k = k + i_bh * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+          tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
     p_v = v + i_bh * s_vo_h + i_v * BV + \
-        tl.arange(0, BV) + ((T-1) * DV if REVERSE else 0)
+          tl.arange(0, BV) + ((T - 1) * DV if REVERSE else 0)
     p_do = do + i_bh * s_vo_h + i_v * BV + \
-        tl.arange(0, BV) + ((T-1) * DV if REVERSE else 0)
+           tl.arange(0, BV) + ((T - 1) * DV if REVERSE else 0)
     p_dq = dq + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
+           tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
 
     # vector W
     # p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
@@ -244,8 +240,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 
     if USE_INITIAL_STATE:
         p_init_s = initial_state + i_bh * DK * DV + \
-            (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
-            (i_v * BV + tl.arange(0, BV)[:, None])
+                   (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
+                   (i_v * BV + tl.arange(0, BV)[:, None])
         h += tl.load(p_init_s, mask=mask_kv, other=0).to(tl.float32)
 
     for _ in range(0, T):
@@ -274,53 +270,53 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 
 @triton.jit
 def fused_recurrent_rwkv6_bwd_kernel_dkv(
-    # B: batch_size, H: n_heads, T: seq_len, D: d_head
-    # NV: number of split in the V dimension. NK: number of split in the K dimension
-    q,  # query [B, H, L, D_head_K]
-    k,  # key [B, H, L, D_head_V]
-    v,  # value [B, H, L, D_head_V]
-    w,  # log gate [B, H, L, D_head_K]
-    u,  # bonus [B, H, D_head_K]
+        # B: batch_size, H: n_heads, T: seq_len, D: d_head
+        # NV: number of split in the V dimension. NK: number of split in the K dimension
+        q,  # query [B, H, L, D_head_K]
+        k,  # key [B, H, L, D_head_V]
+        v,  # value [B, H, L, D_head_V]
+        w,  # log gate [B, H, L, D_head_K]
+        u,  # bonus [B, H, D_head_K]
 
-    do,  # gradient of output [B, H, L, D_head_V] ??
-    dk,
-    dk_aux,  # [B, H, L, D_head_K, D_head_V] ??
-    dv,
+        do,  # gradient of output [B, H, L, D_head_V] ??
+        dk,
+        dk_aux,  # [B, H, L, D_head_K, D_head_V] ??
+        dv,
 
-    # initial hidden state initialization [B, H, D_head_K, D_head_V]
-    s_qk_h,  # stride size: L * D_head_K
-    s_qk_t,  # stride size: D_head_K
-    s_qk_d,  # stride size: 1
+        # initial hidden state initialization [B, H, D_head_K, D_head_V]
+        s_qk_h,  # stride size: L * D_head_K
+        s_qk_t,  # stride size: D_head_K
+        s_qk_d,  # stride size: 1
 
-    s_vo_h,  # stride size: L * D_head_V
-    s_vo_t,  # stride size: D_head_V
-    s_vo_d,  # stride size: 1
+        s_vo_h,  # stride size: L * D_head_V
+        s_vo_t,  # stride size: D_head_V
+        s_vo_d,  # stride size: 1
 
-    B,  # batch_size
-    H,  # n_heads
-    T,  # seq_len
-    scale,  # D_head_K ** -0.5
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
-    DK: tl.constexpr,  # D_head_K
-    DV: tl.constexpr,  # D_head_V
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
+        B,  # batch_size
+        H,  # n_heads
+        T,  # seq_len
+        scale,  # D_head_K ** -0.5
+        BK: tl.constexpr,  # BLOCK SIZE along the K dimension
+        BV: tl.constexpr,  # BLOCK SIZE along the V dimension
+        DK: tl.constexpr,  # D_head_K
+        DV: tl.constexpr,  # D_head_V
+        USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
+        REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
     p_q = q + i_bh * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+          tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
     p_k = k + i_bh * s_qk_h + i_k * BK + \
-        tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+          tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
     p_do = do + i_bh * s_vo_h + i_v * BV + \
-        tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
+           tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
     p_v = v + i_bh * s_vo_h + i_v * BV + \
-        tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
+          tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
     p_dk = dk + (i_bh + i_v * B * H) * s_qk_h + i_k * \
-        BK + tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+           BK + tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
     p_dv = dv + (i_bh + i_k * B * H) * s_vo_h + i_v * \
-        BV + tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
+           BV + tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
 
     # vector W
     # p_dk_aux = dk_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * \
@@ -347,12 +343,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     # vector U
     # p_u = u + i_h * DK + tl.arange(0, BK) + i_k * BK
     p_u = u + i_h * DK * DV + \
-        (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
-        (i_v * BV + tl.arange(0, BV)[None, :])
+          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[None, :])
 
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
 
-    for _ in range(T-1, -1, -1):
+    for _ in range(T - 1, -1, -1):
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
@@ -452,14 +448,13 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         # FIXME: this numbers determine the max head size we can take
         BB_DV = BB = 32
 
-
         BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB_DV)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
-        dq = q.new_empty(NV, batch_size, n_heads,  seq_len,
+        dq = q.new_empty(NV, batch_size, n_heads, seq_len,
                          d_head_qk, dtype=torch.float32)
-        dq_aux = w.new_empty(NV, NK, batch_size, n_heads, seq_len,
+        dq_aux = w.new_zeros(NV, NK, batch_size, n_heads, seq_len,
                              d_head_qk, d_head_v, dtype=torch.float32)
         grid = (NV, NK, batch_size * n_heads)
 
@@ -477,16 +472,15 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dq = dq.sum(0).to(q)
         dq_aux = dq_aux.sum((0, 1)).to(w)
 
-
         BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), BB)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
-        dk = q.new_empty(NV, batch_size, n_heads,  seq_len,
+        dk = q.new_empty(NV, batch_size, n_heads, seq_len,
                          d_head_qk, dtype=torch.float32)
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
                          d_head_v, dtype=torch.float32)
-        dk_aux = w.new_empty(NV, NK, batch_size, n_heads, seq_len,
+        dk_aux = w.new_zeros(NV, NK, batch_size, n_heads, seq_len,
                              d_head_qk, d_head_v, dtype=torch.float32)
 
         grid = (NV, NK, batch_size * n_heads)
@@ -519,25 +513,21 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             dw[:, :, 0] = 0.
         du = th.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
 
-        # dq, dk, dv, dw, du = map(lambda x: th.ones_like(x).mul_(1e-7).to(q.dtype), (dq, dk, dv, dw, du))
-
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
 
 
-
-
 # if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
 def fused_recurrent_rwkv6hypno(
-    r: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    w: torch.Tensor,
-    u: torch.Tensor,
-    scale: int = -1,
-    initial_state: torch.Tensor = None,
-    output_final_state: bool = False,
-    causal: bool = True
+        r: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        w: torch.Tensor,
+        u: torch.Tensor,
+        scale: int = -1,
+        initial_state: torch.Tensor = None,
+        output_final_state: bool = False,
+        causal: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -570,8 +560,10 @@ def fused_recurrent_rwkv6hypno(
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 1024, 256, 256
-    def gen_inputs(): 
+    B, H, L, K, V = 1, 1, 128, 256, 256
+
+
+    def gen_inputs():
         th.manual_seed(17)
         device = "cuda"
 
@@ -582,7 +574,8 @@ if __name__ == "__main__":
         wt = th.randn(B, H, L, K, V, device=device, requires_grad=True)
         ut = th.randn(H, K, V, device=device, requires_grad=True)
         return rt, kt, vt, wt, ut
-    
+
+
     rt, kt, vt, wt, ut = gen_inputs()
     w_ = -th.exp(wt)
     o = naive_recurrent_rwkv6_umat(rt, kt, vt, w_, ut)
@@ -597,7 +590,7 @@ if __name__ == "__main__":
     }
 
     # print("grad of ut", ut.grad)
-    
+
     rt, kt, vt, wt, ut = gen_inputs()
     w_ = -th.exp(wt)
     ot, fstate = fused_recurrent_rwkv6hypno(rt, kt, vt, w_, ut, scale=1)
@@ -613,7 +606,7 @@ if __name__ == "__main__":
         "kt": kt.grad.clone(),
         "vt": vt.grad.clone()
     }
-    for k,v in grads.items():
+    for k, v in grads.items():
         print(f"k:{k} {grads[k] - grad2[k]}")
 
     # rt, kt, vt, wt, ut = gen_inputs()
@@ -621,4 +614,3 @@ if __name__ == "__main__":
     # ot, fstate = fused_recurrent_rwkv6(rt, kt, vt, wt, ut, scale=1)
     # print("and default rwkv", ot)
     # print(ut.grad)
-    
