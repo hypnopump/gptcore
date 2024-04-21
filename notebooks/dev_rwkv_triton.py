@@ -1,4 +1,4 @@
-# run with: TRITON_INTERPRET=0 python dev_rwkv6_triton.py
+# run with: TRITON_INTERPRET=0 python dev_rwkv_triton.py
 
 import torch as th
 import torch.nn.functional as F
@@ -192,13 +192,13 @@ def test_chunked_v6plus(B, H, L, K, V):
         kt = th.randn(B, H, L, K, device=device, requires_grad=True)
         vt = th.randn(B, H, L, V, device=device, requires_grad=True)
         wt = th.randn(B, H, L, K, device=device, requires_grad=True)
-        ut = th.randn(H, K, device=device, requires_grad=True)
+        ut = th.randn(H, K, V, device=device, requires_grad=True)
         return rt, kt, vt, wt, ut
 
 
     rt, kt, vt, wt, ut = gen_inputs()
     w_ = -th.exp(wt)
-    o = naive_recurrent_rwkv6(rt, kt, vt, w_, ut)
+    o = naive_recurrent_rwkv6_umat(rt, kt, vt, w_, ut)
     # print("naive kernel", o)
     o.mean().backward()
     grads = {
@@ -217,17 +217,17 @@ def test_chunked_v6plus(B, H, L, K, V):
     # print("modified kernel", ot)
     print("native - modified kernel", o - ot)
 
-    # ot.mean().backward()
-    # # print("fused", ut.grad, rt.grad, kt.grad)
-    # grad2 = {
-    #     "ut": ut.grad.clone(),
-    #     "wt": wt.grad.clone(),
-    #     "rt": rt.grad.clone(),
-    #     "kt": kt.grad.clone(),
-    #     "vt": vt.grad.clone()
-    # }
-    # for k, v in grads.items():
-    #     print(f"k:{k} {grads[k] - grad2[k]}")
+    ot.mean().backward()
+    # print("fused", ut.grad, rt.grad, kt.grad)
+    grad2 = {
+        "ut": ut.grad.clone(),
+        "wt": wt.grad.clone(),
+        "rt": rt.grad.clone(),
+        "kt": kt.grad.clone(),
+        "vt": vt.grad.clone()
+    }
+    for k, v in grads.items():
+        print(f"k:{k} {grads[k] - grad2[k]}")
 
 
 #######################################

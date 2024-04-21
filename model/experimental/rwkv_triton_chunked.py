@@ -190,7 +190,7 @@ def chunk_rwkv6_fwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    DK: tl.constexpr
+    DK: tl.constexpr,
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
@@ -233,6 +233,10 @@ def chunk_rwkv6_fwd_kernel_intra(
         m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
         p_u = tl.make_block_ptr(u + i_h * DK, (DK,), (1,), (i_k * BK), (BK,), (0,))
         b_u = tl.load(p_u, boundary_check=(0,))
+        # FIXME: if running with real U: add DV to make a square indexing matrix.
+        # p_u = tl.make_block_ptr(u + i_h * DK * DV, (DK, DV), (DV,1), (i_k * BK * DV), (BK,BV), (0,))
+        # b_u = tl.load(p_u, boundary_check=(0,1))
+
         for j in range(0, BC):
             # inter
             # [BK,]
@@ -625,9 +629,10 @@ class ChunkRWKV6Function(torch.autograd.Function):
             ht=final_state if final_state is not None else None
         )
         A = q.new_zeros(NK, B, H, T, BT)
+        u_ = u.new_zeros(H, K, V)
         grid = (NK, NT * NC * NC, B * H)
         chunk_rwkv6_fwd_kernel_intra[grid](
-            q, k, g, gs, u, A,
+            q, k, g, gs, u_, A,
             k.stride(1), k.stride(2), k.stride(3),
             scale,
             H=H, T=T, K=K, BT=BT, BC=BC, BK=BK, NC=NC, DK=K,
@@ -648,6 +653,8 @@ class ChunkRWKV6Function(torch.autograd.Function):
             num_warps=num_warps,
             num_stages=num_stages
         )
+        # FIXME: ignore U for now and just build extra output (price paid)
+        o = o + torch.einsum('bhic,hcd,bhic,bhid->bhid', q, u, k, v)
 
         # if checkpoint_level >= 1:
         #     del g
@@ -656,10 +663,12 @@ class ChunkRWKV6Function(torch.autograd.Function):
             del h
             h, initial_state = None, None
         del g, gs
+
         ctx.save_for_backward(q, k, v, g_org, u, h, initial_state, A)
         ctx.BT = BT
         ctx.scale = scale
         ctx.checkpoint_level = checkpoint_level
+
         return o, final_state
 
     @staticmethod
@@ -764,22 +773,31 @@ class ChunkRWKV6Function(torch.autograd.Function):
         dg = (dq * q)[:, :, 1:] - (dk * k)[:, :, 0:-1]
         dg = torch.nn.functional.pad(dg, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
         dg = chunk_reversed_cumsum_fwd(dg).to(g)
-        # equivalent to the following pytorch code.
-        # du = ((do * v).sum(-1)[..., None] * k * q * scale).sum(-2).to(u)
-        # dq += ((do * v).sum(-1)[..., None] * k * scale * u[:, :, None, :])
-        # dk += ((do * v).sum(-1)[..., None] * q * scale * u[:, :, None, :])
-        BT = 64
-        grid = (triton.cdiv(T, BT), B * H)
-        du = torch.empty_like(g, dtype=torch.float)
-        post_process_grad[grid](
-            q, k, v, u, do, dk, dq, du, scale,
-            q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3), H=H,
-            T=T, BT=BT, K=K, V=V, BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
-            num_warps=4
-        )
-        du = du.sum([0, 2])
+        # # equivalent to the following pytorch code.
+        # # du = ((do * v).sum(-1)[..., None] * k * q * scale).sum(-2).to(u)
+        # # dq += ((do * v).sum(-1)[..., None] * k * scale * u[:, :, None, :])
+        # # dk += ((do * v).sum(-1)[..., None] * q * scale * u[:, :, None, :])
+        # BT = 64
+        # grid = (triton.cdiv(T, BT), B * H)
+        # du = torch.empty_like(g, dtype=torch.float)
+        # post_process_grad[grid](
+        #     q, k, v, u, do, dk, dq, du, scale,
+        #     q.stride(1), q.stride(2), q.stride(3),
+        #     v.stride(1), v.stride(2), v.stride(3), H=H,
+        #     T=T, BT=BT, K=K, V=V, BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
+        #     num_warps=4
+        # )
+        # du = du.sum([0, 2])
 
+        # only multiply if differen
+        qscale, kscale = q, k
+        if abs(1 - scale) > 1e-5:
+            qscale = q * scale
+            kscale = k * scale
+
+        dq += torch.einsum('bhnv,bhnk,hkv->bhnk', do * v, kscale, u)
+        dq += torch.einsum('bhnv,bhnk,hkv->bhnk', do * v, qscale, u)
+        du = torch.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
 
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, None, None, None
 
