@@ -450,8 +450,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
         # FIXME: beware we have indexing problems and
         # FIXME: this numbers determine the max head size we can take
-        BB_DV = 128
-        BB = 128
+        BB_DV = BB = 32
 
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB_DV)
@@ -479,7 +478,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dq_aux = dq_aux.sum((0, 1)).to(w)
 
 
-        BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB)
+        BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), BB)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
