@@ -428,7 +428,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             REVERSE=ctx.reverse,
         )
         dq = dq.sum(0).to(q)
-        dq_aux = dq_aux.sum((0, 1)).to(w) * scale
+        dq_aux2 = dq_aux.sum((0, 1)).to(w) * scale
+        del dq_aux
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), BB)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
@@ -456,7 +457,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         )
         dk = dk.sum(0).to(k)
         dv = dv.sum(0).to(v)
-        dk_aux = dk_aux.sum((0, 1)).to(w)
+        dk_aux2 = dk_aux.sum((0, 1)).to(w)
+        del dk_aux
 
         # only multiply if differen
         qscale = q
@@ -465,7 +467,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
         B, H, L, K, V = batch_size, n_heads, seq_len, d_head_qk, d_head_v
         # dw = (dq_aux * qscale[..., None])[:, :, 1:] - (k[..., None] * dk_aux)[:, :, :-1]
-        dw = dq_aux[:, :, 1:] - dk_aux[:, :, :-1]
+        dw = dq_aux2[:, :, 1:] - dk_aux2[:, :, :-1]
         # # (b h n dk dv) -> (b h n (dk dv)) -> cumsum -> (b h n dk dv)
         dw = torch.nn.functional.pad(dw, (0, 0, 0, 0, 0, 1), value=0)
         dw = dw.reshape(B, H, L, -1)
