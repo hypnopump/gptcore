@@ -22,7 +22,8 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .rwkv_inner import rwkv_inner
-from .rwkv_triton_v7 import fused_recurrent_rwkv6hypno
+from .rwkv_triton import fused_recurrent_rwkv6hypno
+from .rwkv_triton_v7 import fused_recurrent_rwkv7hypno
 from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
 
 
@@ -105,7 +106,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         args = RWKVConfig(hparams)
         self.umat = True
-        self.wmat = True
+        self.wmat = False
+        self.k_one_minus_w = True
 
         self.args = args
         self.layer_id = layer_id
@@ -256,13 +258,22 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             w = (1e-4 + (1-1e-4) * (-w.exp()).exp()).log()
         else:
             w = time_decay.view(1, H, 1, K)
-            w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
+            if self.k_one_minus_w:
+                w = w+k
+                w = (-w.exp()).exp()
+                k = 1-w
+            else:
+                w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
+                w = (-w.exp()).exp()
             # w = -torch.exp(w) # log(exp(-exp))
-            w = (1e-4 + (1 - 1e-4) * (-w.exp()).exp()).log()
+            w = (1e-4 + (1 - 1e-4) * w).log()
 
         if self.umat:
             u = time_first.view(H,K,V)
-            out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)
+            if self.wmat:
+                out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, kv_state)
+            else:
+                out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)
         else:
             u = time_first.view(H,K)
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)

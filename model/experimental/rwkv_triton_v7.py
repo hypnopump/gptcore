@@ -400,8 +400,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         # FIXME: beware we have indexing problems and
         # FIXME: this numbers determine the max head size we can take
         # FIXME: original numbers were BB = 32, BB_DV = 64
-        BB_DV = 128
-        BB = 128
+        BB_DV = 32
+        BB = 32
 
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB_DV)
@@ -475,7 +475,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
 
 # if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
-def fused_recurrent_rwkv6hypno(
+def fused_recurrent_rwkv7hypno(
     r: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
