@@ -61,6 +61,33 @@ def rwkv6_0_recurrent(r_in, k_in, v_in, w_in, u, kv_state):
     out = torch.cat(out, dim=-2)
     return out, kv_state
 
+def rwkv7_recurrent(r_in, k_in, v_in, w_in, u, kv_state = 0.):
+    """
+    * r_in: (B,H,L,K)
+    * k_in: (B,H,L,K)
+    * v_in: (B,H,L,V)
+    * w_in: (B,H,L,K,V)
+    * u: (H,K,V)
+    """
+    B,H,L,K = r_in.shape
+    V = v_in.size(-1)
+    L = r_in.size(-2)
+    out = []
+    kmt = k_in.mT
+    w_ = w_in.unbind(dim=-3)
+    r_ = r_in.unsqueeze(-3).unbind(dim=-2)
+    kvs = torch.einsum('bhik,bhid->bhikd', k_in, v_in).unbind(dim=-3)
+    for t in range(L):
+        r, k, v = r_in[...,t:t+1,:], kmt[...,t:t+1], v_in[...,t:t+1,:]
+        # w = w_in[...,t,:,:]
+        kv = kvs[t]
+        # out.append( r @ (kv_state + u * kv) ) # 1K @ KV -> 1V
+        # kv_state = (w * kv_state) + kv  # KV
+        out.append(r_[t] @ torch.addcmul(kv_state, u, kv))
+        kv_state = torch.addcmul(kv, w_[t], kv_state)
+    out = torch.cat(out, dim=-2)
+    return out, None
+
 def sanity_check():
     torch.manual_seed(1337)
     
@@ -112,7 +139,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         args = RWKVConfig(hparams)
         self.umat = True  # True
-        self.wmat = False  # True
+        self.wmat = True  # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -252,13 +279,19 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         kv_state = recurrent_memory
 
+        # if kv_state is None:
+        #     kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+        #
+        # if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
+        #     kv_state = kv_state.contiguous().to(torch.bfloat16)
+
         if self.wmat:
             w = time_decay.view(1, H, 1, K, V)
             w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2)  # BHTK()
             # w = -torch.exp(w) # log(exp(-exp))
             w = (-w.exp()).exp()
             # w = w[..., [0]].repeat(1, 1, 1, 1, V)
-            w = (1e-4 + (1-1e-4) * w).log()
+            w = (1e-4 + (1-1e-4) * w).log()  # (B, H, T, K, V)
         else:
             w = time_decay.view(1, H, 1, K)
             if self.k_one_minus_w:
@@ -269,30 +302,22 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                 w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
                 w = (-w.exp()).exp()
             # w = -torch.exp(w) # log(exp(-exp))
-            w = (1e-4 + (1 - 1e-4) * w).log()
+            w = (1e-4 + (1 - 1e-4) * w).log()  # (B, H, T, K)
 
         if self.umat:
-            # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 40 ktok/s || chunked = ???
             u = time_first.view(H,K,V)
             if self.wmat:
-                out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+                # out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+                kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+                out, s = rwkv7_recurrent(r, k, v, w, u, kv_state)
             else:
+                # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 40 ktok/s || chunked = ???
                 # out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-                if kv_state is None:
-                    kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-
-                if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
-                    kv_state = kv_state.contiguous().to(torch.bfloat16)
-
+                kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
                 out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
         else:
             # torch + th.compile = 200 ktok/s || torch+fcompile = 80 ktok/s || torch = 70 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
-            if kv_state is None:
-                kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-
-            if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
-                kv_state = kv_state.contiguous().to(torch.bfloat16)
-
+            kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
             u = time_first.view(1,H,1,K)
             out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
 
