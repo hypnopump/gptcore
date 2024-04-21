@@ -106,8 +106,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         args = RWKVConfig(hparams)
         self.umat = True
-        self.wmat = False
-        self.k_one_minus_w = True
+        self.wmat = True
+        self.k_one_minus_w = False
 
         self.args = args
         self.layer_id = layer_id
@@ -253,9 +253,11 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         if self.wmat:
             w = time_decay.view(1, H, 1, K, V)
-            w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2) # BHTK
+            w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2)  # BHTK()
             # w = -torch.exp(w) # log(exp(-exp))
-            w = (1e-4 + (1-1e-4) * (-w.exp()).exp()).log()
+            w = (-w.exp()).exp()
+            # w = w[..., [0]].repeat(1, 1, 1, 1, V)
+            w = (1e-4 + (1-1e-4) * w).log()
         else:
             w = time_decay.view(1, H, 1, K)
             if self.k_one_minus_w:
@@ -271,6 +273,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         if self.umat:
             u = time_first.view(H,K,V)
             if self.wmat:
+                breakpoint()
                 out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, kv_state)
             else:
                 out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)
@@ -278,6 +281,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             u = time_first.view(H,K)
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
             out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)
+
+        print("o", out)
+        breakpoint()
 
         out = out.transpose(1,2).reshape(B*T, H*V)
         out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)

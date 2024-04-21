@@ -32,8 +32,8 @@ cli.Config(
             vocab_size = VOCAB_SIZE,
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
-            n_layer=8,
-            n_head=2,
+            n_layer=1,
+            n_head=8,
             d_model=512,
 
             feedforward_d_model_ratio=3,

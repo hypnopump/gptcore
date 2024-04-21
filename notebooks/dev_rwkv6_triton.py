@@ -215,7 +215,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     # vector W
     # p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
     #     tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
-    p_dq_aux = dq_aux + (i_v * DK * B * H * DK + i_k * B * H + i_bh) * s_qk_h * DV + \
+    p_dq_aux = dq_aux + i_v * i_k * i_bh * s_qk_h * DV + \
                (i_k * BK + tl.arange(0, BK))[None, :] * DV + \
                (i_v * BV + tl.arange(0, BV))[:, None] + \
                ((T - 1) * DK * DV if REVERSE else 0)
@@ -325,7 +325,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     # vector W
     # p_dk_aux = dk_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * \
     #     BK + tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
-    p_dk_aux = dk_aux + (i_v * B * H * DK + i_k * B * H + i_bh) * s_qk_h * DV + \
+    p_dk_aux = dk_aux + i_v * i_k * i_bh * s_qk_h * DV + \
                (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
                (i_v * BV + tl.arange(0, BV)[None, :]) + \
                ((T - 1) * DK * DV if not REVERSE else 0)
@@ -517,10 +517,14 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         # first W multiplies an empty state
         if initial_state is None:
             dw[:, :, 0] = 0.
-
         du = th.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
+
+        # dq, dk, dv, dw, du = map(lambda x: th.ones_like(x).mul_(1e-7).to(q.dtype), (dq, dk, dv, dw, du))
+
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
+
+
 
 
 # if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
@@ -566,7 +570,7 @@ def fused_recurrent_rwkv6hypno(
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 4, 256, 256
+    B, H, L, K, V = 1, 1, 1024, 256, 256
     def gen_inputs(): 
         th.manual_seed(17)
         device = "cuda"
