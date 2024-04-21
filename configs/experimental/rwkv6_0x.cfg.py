@@ -45,7 +45,7 @@ cli.Config(
         ),
         layer_factory=lambda: model.core.TransformerLayer(
             self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
-            #feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
+            # feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
             feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
             # residual_op_factory=lambda: model.core.ResidualAddOp(),
         ),
@@ -68,7 +68,7 @@ cli.Config(
             log_every_n_steps=20,
             logger = [
                 # lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                # lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
             #devices=1,
             #strategy='ddp',

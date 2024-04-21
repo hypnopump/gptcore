@@ -69,13 +69,15 @@ def rwkv7_recurrent(r_in, k_in, v_in, w_in, u, kv_state = 0.):
     * w_in: (B,H,L,K,V)
     * u: (H,K,V)
     """
+    dtype = r_in.dtype
     B,H,L,K = r_in.shape
     V = v_in.size(-1)
     L = r_in.size(-2)
     out = []
-    kmt = k_in.mT
-    w_ = w_in.unbind(dim=-3)
-    r_ = r_in.unsqueeze(-3).unbind(dim=-2)
+    kmt = k_in.mT.float()
+    w_ = w_in.float().unbind(dim=-3)
+    r_ = r_in.float().unsqueeze(-3).unbind(dim=-2)
+    kv_state = kv_state.float()
     kvs = torch.einsum('bhik,bhid->bhikd', k_in, v_in).unbind(dim=-3)
     for t in range(L):
         r, k, v = r_in[...,t:t+1,:], kmt[...,t:t+1], v_in[...,t:t+1,:]
@@ -85,7 +87,7 @@ def rwkv7_recurrent(r_in, k_in, v_in, w_in, u, kv_state = 0.):
         # kv_state = (w * kv_state) + kv  # KV
         out.append(r_[t] @ torch.addcmul(kv_state, u, kv))
         kv_state = torch.addcmul(kv, w_[t], kv_state)
-    out = torch.cat(out, dim=-2)
+    out = torch.cat(out, dim=-2).to(dtype)
     return out, None
 
 def sanity_check():
@@ -139,7 +141,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         args = RWKVConfig(hparams)
         self.umat = True  # True
-        self.wmat = True  # True
+        self.wmat = False  # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -285,13 +287,14 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         # if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
         #     kv_state = kv_state.contiguous().to(torch.bfloat16)
 
+        eps = 1e-3
         if self.wmat:
             w = time_decay.view(1, H, 1, K, V)
             w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2)  # BHTK()
             # w = -torch.exp(w) # log(exp(-exp))
             w = (-w.exp()).exp()
             # w = w[..., [0]].repeat(1, 1, 1, 1, V)
-            w = (1e-4 + (1-1e-4) * w).log()  # (B, H, T, K, V)
+            w = (eps + (1-eps) * w).log()  # (B, H, T, K, V)
         else:
             w = time_decay.view(1, H, 1, K)
             if self.k_one_minus_w:
@@ -302,14 +305,14 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                 w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
                 w = (-w.exp()).exp()
             # w = -torch.exp(w) # log(exp(-exp))
-            w = (1e-4 + (1 - 1e-4) * w).log()  # (B, H, T, K)
+            w = (eps + (1 - eps) * w).log()  # (B, H, T, K)
 
         if self.umat:
             u = time_first.view(H,K,V)
             if self.wmat:
-                # out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-                kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-                out, s = rwkv7_recurrent(r, k, v, w, u, kv_state)
+                out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+                # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+                # out, s = rwkv7_recurrent(r, k, v, w, u, kv_state)
             else:
                 # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 40 ktok/s || chunked = ???
                 # out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)

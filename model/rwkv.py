@@ -263,6 +263,7 @@ class RWKV_ChannelMixSubLayer(model.core.TransformerLayerPart, model.interface.I
                 gain = 1.0
             nn.init.orthogonal_(m.weight, gain=gain)
 
+    @torch.compile
     def forward(self, x):
         xx = self.time_shift(x)
         xk = x * self.time_mix_k + xx * (1 - self.time_mix_k)
