@@ -217,17 +217,17 @@ def test_chunked_v6plus(B, H, L, K, V):
     # print("modified kernel", ot)
     print("native - modified kernel", o - ot)
 
-    ot.mean().backward()
-    # print("fused", ut.grad, rt.grad, kt.grad)
-    grad2 = {
-        "ut": ut.grad.clone(),
-        "wt": wt.grad.clone(),
-        "rt": rt.grad.clone(),
-        "kt": kt.grad.clone(),
-        "vt": vt.grad.clone()
-    }
-    for k, v in grads.items():
-        print(f"k:{k} {grads[k] - grad2[k]}")
+    # ot.mean().backward()
+    # # print("fused", ut.grad, rt.grad, kt.grad)
+    # grad2 = {
+    #     "ut": ut.grad.clone(),
+    #     "wt": wt.grad.clone(),
+    #     "rt": rt.grad.clone(),
+    #     "kt": kt.grad.clone(),
+    #     "vt": vt.grad.clone()
+    # }
+    # for k, v in grads.items():
+    #     print(f"k:{k} {grads[k] - grad2[k]}")
 
 
 #######################################
