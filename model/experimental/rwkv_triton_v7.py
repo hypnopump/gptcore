@@ -400,8 +400,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         # FIXME: beware we have indexing problems and
         # FIXME: this numbers determine the max head size we can take
         # FIXME: original numbers were BB = 32, BB_DV = 64
-        BB_DV = 16
-        BB = 16
+        BB_DV = 32
+        BB = 32
 
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB_DV)
