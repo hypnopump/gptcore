@@ -22,9 +22,14 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .rwkv_inner import rwkv_inner
+# supports Umat, not Wmat
 from .rwkv_triton import fused_recurrent_rwkv6hypno
+# supports both Umat and Wmat
 from .rwkv_triton_v7 import fused_recurrent_rwkv7hypno
+# base RWKV6. chunked is significantly faster (80ktok/s vs 50ktok/s on uncompiled L8D512H8; seq_len=1024; A100)
 from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
+from fla.ops.rwkv6.chunk import chunk_rwkv6
+
 
 
 # fused_recurrent_rwkv6 = torch._dynamo.disable(fused_recurrent_rwkv6)
@@ -105,8 +110,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = True
-        self.wmat = True
+        self.umat = True  # True
+        self.wmat = True  # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -273,13 +278,15 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         if self.umat:
             u = time_first.view(H,K,V)
             if self.wmat:
-                out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, kv_state)
+                out, s = fused_recurrent_rwkv7hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
             else:
-                out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, kv_state)
+                out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
         else:
             u = time_first.view(H,K)
+            # torch + th.compile = 200 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
-            out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state)
+            # out, s = fused_recurrent_rwkv6(r, k, v, w, u, kv_state, scale=1.0)
+            out, s = chunk_rwkv6(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=1)
 
         out = out.transpose(1,2).reshape(B*T, H*V)
         out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)

@@ -462,6 +462,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         qscale = q
         if abs(1-scale) > 1e-5:
             qscale = q * scale
+
+        B, H, L, K, V = batch_size, n_heads, seq_len, d_head_qk, d_head_v
         # dw = (dq_aux * qscale[..., None])[:, :, 1:] - (k[..., None] * dk_aux)[:, :, :-1]
         dw = dq_aux[:, :, 1:] - dk_aux[:, :, :-1]
         # # (b h n dk dv) -> (b h n (dk dv)) -> cumsum -> (b h n dk dv)
