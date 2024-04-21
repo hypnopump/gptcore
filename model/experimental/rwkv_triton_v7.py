@@ -428,7 +428,10 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             REVERSE=ctx.reverse,
         )
         dq = dq.sum(0).to(q)
-        dq_aux2 = dq_aux.sum((0, 1)).to(w) * scale
+        dq_aux2 = dq_aux.sum((0, 1)).to(w)
+        # only multiply if differen
+        if abs(1 - scale) > 1e-5:
+            dq_aux2.mul_(scale)
         del dq_aux
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), BB)
@@ -460,11 +463,6 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dk_aux2 = dk_aux.sum((0, 1)).to(w)
         del dk_aux
 
-        # only multiply if differen
-        qscale = q
-        if abs(1-scale) > 1e-5:
-            qscale = q * scale
-
         B, H, L, K, V = batch_size, n_heads, seq_len, d_head_qk, d_head_v
         # dw = (dq_aux * qscale[..., None])[:, :, 1:] - (k[..., None] * dk_aux)[:, :, :-1]
         dw = dq_aux2[:, :, 1:] - dk_aux2[:, :, :-1]
@@ -477,6 +475,10 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         # first W multiplies an empty state
         if initial_state is None:
             dw[:, :, 0] = 0.
+
+        qscale = q
+        if abs(1 - scale) > 1e-5:
+            qscale = q * scale
         du = th.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
 
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)

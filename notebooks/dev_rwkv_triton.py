@@ -10,6 +10,8 @@ import sys
 sys.path.append("../")
 from model.experimental.rwkv_triton_v7 import fused_recurrent_rwkv7hypno
 from model.experimental.rwkv_triton_chunked import chunk_rwkv6
+from model.experimental.rwkv_triton_v6hypno_chunked import chunked_fw_recurrent_bw_rwkv6hypno
+
 
 
 def naive_recurrent_rwkv6(
@@ -213,7 +215,8 @@ def test_chunked_v6plus(B, H, L, K, V):
 
     rt, kt, vt, wt, ut = gen_inputs()
     w_ = -th.exp(wt)
-    ot, fstate = chunk_rwkv6(rt, kt, vt, w_, ut, scale=1)
+    # ot, fstate = chunk_rwkv6(rt, kt, vt, w_, ut, scale=1)
+    ot, fstate = chunked_fw_recurrent_bw_rwkv6hypno(rt, kt, vt, w_, ut, scale=1)
     # print("modified kernel", ot)
     print("native - modified kernel", o - ot)
 

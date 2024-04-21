@@ -6,8 +6,16 @@ from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
 from fla.ops.rwkv6.chunk import chunk_rwkv6
 # from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
 
-
 # from .model.experimental.rwkv_inner import rwkv_inner
+
+import sys
+sys.path.append("../")
+from model.experimental.rwkv_triton_v6hypno import fused_recurrent_rwkv6hypno
+from model.experimental.rwkv_triton_chunked import chunk_rwkv6
+from model.experimental.rwkv_triton_v6hypno_chunked import chunked_fw_recurrent_bw_rwkv6hypno
+
+
+
 # 24 is optimal chunk length (longer will use too much memory and cause precision problems or even numerical instability, shorter is inefficient)
 def rwkv_inner(r,k,v,w,u,kv_state,chunk_len:int=24,precision_dtype:th.dtype=th.float32):
     """
@@ -174,31 +182,41 @@ def test_rwkv():
     assert th.allclose(rc.grad, rt.grad, atol=1e-5)
 
 
+SCALES = [
+    [1024, 512, 8],
+    [1024, 512, 4],
+    [1024, 512, 2],
+    [1024, 512, 1],
+    [2 * 1024, 512, 8],
+    [2 * 1024, 512, 4],
+    [2 * 1024, 512, 2],
+    [2 * 1024, 512, 1],
+    [4 * 1024, 512, 8],
+    [4 * 1024, 512, 4],
+    [4 * 1024, 512, 2],
+    [4 * 1024, 512, 1],
+    [4 * 1024, 4096, 16],
+    [4 * 1024, 2048, 8],
+    [4 * 1024, 1024, 8],
+    [4 * 1024, 1024, 4],
+    [8 * 1024, 512, 8],
+    [8 * 1024, 512, 4],
+    [8 * 1024, 512, 2],
+    [8 * 1024, 512, 1],
+    [1 * 1024, 2 * 512, 2 * 8],
+    [1 * 1024, 2 * 512, 2 * 4],
+    [1 * 1024, 2 * 512, 2 * 2],
+    [1 * 1024, 2 * 512, 2 * 1],
+    [1 * 1024, 4 * 512, 4 * 8],
+    [1 * 1024, 4 * 512, 4 * 4],
+    [1 * 1024, 4 * 512, 4 * 2],
+    [1 * 1024, 4 * 512, 4 * 1],
+]
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["L", "KH", "H"],
-        x_vals=[
-            [1024, 512, 8], 
-            [1024, 512, 4], 
-            [1024, 512, 2], 
-            [1024, 512, 1], 
-            [2 * 1024, 512, 8], 
-            [2 * 1024, 512, 4], 
-            [2 * 1024, 512, 2], 
-            [2 * 1024, 512, 1], 
-            [8 * 1024, 512, 8],
-            [8 * 1024, 512, 4],
-            [8 * 1024, 512, 2],
-            [8 * 1024, 512, 1],
-            [1 * 1024, 2 * 512, 2 * 8],
-            [1 * 1024, 2 * 512, 2 * 4],
-            [1 * 1024, 2 * 512, 2 * 2],
-            [1 * 1024, 2 * 512, 2 * 1],
-            [1 * 1024, 4 * 512, 4 * 8],
-            [1 * 1024, 4 * 512, 4 * 4],
-            [1 * 1024, 4 * 512, 4 * 2],
-            [1 * 1024, 4 * 512, 4 * 1],
-        ],
+        x_vals=SCALES,
         line_arg="method",
         line_vals=["torch", "triton_recurrent", "triton_chunked"],
         line_names=["Torch", "Triton Recurrent", "Triton Chunked"],
@@ -208,7 +226,7 @@ def test_rwkv():
         args={},
     ),
 )
-def benchmark(H, L, KH, method):
+def benchmark(L, KH, H, method):
     quantiles = [0.5, 0.2, 0.8]
     with th.device("cuda"):
         B = 1
@@ -242,6 +260,46 @@ def benchmark(H, L, KH, method):
 
     return triton.testing.do_bench(step, quantiles=quantiles)
 
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=["L", "KH", "H"],
+        x_vals=SCALES,
+        line_arg="method",
+        line_vals=["triton_recurrent", "triton_chunked_fw_recurrent_bw"],
+        line_names=["Triton Recurrent", "Triton Chunked Fw Recurrent Bw"],
+        styles=[("green", "-"), ("blue", "-")],
+        ylabel="time, ms",
+        plot_name="RWKV6Hypno Triton sequential vs Triton Chunked Fw + Recurrent Bw",
+        args={},
+    ),
+)
+def benchmark_v6hypno(L, KH, H, method):
+    quantiles = [0.5, 0.2, 0.8]
+    with th.device("cuda"):
+        B = 1
+        K = V = KH // H
+        rt, kt, wt = th.randn(3, B, H, L, K, device="cuda", requires_grad=True).to(th.bfloat16)
+        vt = th.randn(B, H, L, V, device="cuda", requires_grad=True).to(th.bfloat16)
+        ut = th.randn(H, K, V, device="cuda", requires_grad=True).to(th.bfloat16)
 
-if __name__ == "__main__": 
-    benchmark.run(show_plots=True, print_data=True)
+    def step():
+        match method:
+            case "triton_recurrent":
+                with th.enable_grad():
+                    wt_ = th.log(th.sigmoid(wt)) # F.logsigmoid(wt)
+                    ot, state = fused_recurrent_rwkv6hypno(rt, kt, vt, wt_, ut, scale=1.0)
+                    ot = ot.mean()
+                ot.backward()
+            case "triton_chunked_fw_recurrent_bw":
+                with th.enable_grad():
+                    wt_ = th.log(th.sigmoid(wt))  # F.logsigmoid(wt)
+                    ot, state = chunked_fw_recurrent_bw_rwkv6hypno(rt, kt, vt, wt_, ut, scale=1.0)
+                    ot = ot.mean()
+                ot.backward()
+
+    return triton.testing.do_bench(step, quantiles=quantiles)
+
+
+if __name__ == "__main__":
+    # benchmark.run(show_plots=True, print_data=True)
+    benchmark_v6hypno.run(show_plots=True, print_data=True)

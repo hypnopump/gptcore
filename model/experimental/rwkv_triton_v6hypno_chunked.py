@@ -11,13 +11,14 @@ from torch.cuda.amp import custom_bwd, custom_fwd
 
 from fla.ops.utils import chunk_reversed_cumsum_fwd
 from fla.utils import contiguous
+from typing import Optional
 
 
 # on-the-fly computation without materializing hidden statets into HBMs
 
 # FIXME: THIS IS A HYBRID BETWEEN `rwkv_triton_v6plus (fw)` and `rwkv_triton_chunked (bw)`
-from rwkv_triton_v6plus import fused_recurrent_rwkv6_bwd_kernel_dq, fused_recurrent_rwkv6_bwd_kernel_dkv
-from rwkv_triton_chunked import chunk_rwkv6_fwd_kernel_h, chunk_rwkv6_fwd_kernel_cum, chunk_rwkv6_fwd_kernel_intra, chunk_rwkv6_fwd_kernel_inter
+from .rwkv_triton_v6hypno import fused_recurrent_rwkv6_bwd_kernel_dq, fused_recurrent_rwkv6_bwd_kernel_dkv
+from .rwkv_triton_chunked import chunk_rwkv6_fwd_kernel_h, chunk_rwkv6_fwd_kernel_cum, chunk_rwkv6_fwd_kernel_intra, chunk_rwkv6_fwd_kernel_inter
 
 
 class ChunkedFwRecurrentBwRWKV6PlusFunction(torch.autograd.Function):
@@ -119,13 +120,13 @@ class ChunkedFwRecurrentBwRWKV6PlusFunction(torch.autograd.Function):
         ctx.BT = BT
         ctx.scale = scale
         ctx.checkpoint_level = checkpoint_level
+        ctx.reverse = False
 
         return o, final_state
 
-
+    # @custom_bwd # inner most decorator
     @staticmethod
     @contiguous
-    @custom_bwd
     def backward(ctx, do, d_final_state=None):
         q, k, v, w, u, initial_state = ctx.saved_tensors
         batch_size, n_heads, seq_len, d_head_qk = q.shape
@@ -189,6 +190,10 @@ class ChunkedFwRecurrentBwRWKV6PlusFunction(torch.autograd.Function):
         if initial_state is None:
             dw[:, :, 0] = 0.
 
+        qscale = q
+        if abs(1 - scale) > 1e-5:
+            qscale = q * scale
+
         du = torch.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
         # du = ((do*dv)[:, :, :, None] * (k * q * scale)[..., None]).sum((0, 2)).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
@@ -196,15 +201,15 @@ class ChunkedFwRecurrentBwRWKV6PlusFunction(torch.autograd.Function):
 
 # if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
 def chunked_fw_recurrent_bw_rwkv6hypno(
-        r: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        w: torch.Tensor,
-        u: torch.Tensor,
-        scale: int = -1,
-        initial_state: torch.Tensor = None,
-        output_final_state: bool = False,
-        causal: bool = True
+    r: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    u: torch.Tensor,
+    scale: Optional[int] = None,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
+    checkpoint_level: Optional[int] = 0
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -217,7 +222,7 @@ def chunked_fw_recurrent_bw_rwkv6hypno(
         w (torch.Tensor):
             data-dependent decays of shape `(B, H, T, K)` in log space! Alias: g.
         u (torch.Tensor):
-            bonus of shape `(H, K, V)`
+            bonus of shape `(H, K)`
         scale (Optional[int]):
             Scale factor for the RWKV6 attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -225,10 +230,16 @@ def chunked_fw_recurrent_bw_rwkv6hypno(
             Initial state of shape `(B, H, K, V)`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `(B, H, K, V)`. Default: `False`.
+        checkpoint_level (Optional[int]):
+            Checkpointing level; higher values will save more memories and do more recomputations during backward.
+            Default: `0`:
+            - Level `0`: store forward hidden states for backprop.
+            - Level `1`: recompute the forward hidden states during backward.
     """
-    if scale == -1:
+    assert checkpoint_level in [0, 1]
+    if scale is None:
         scale = r.shape[-1] ** -0.5
     if initial_state is not None:
         initial_state = initial_state.detach()
-    o, final_state = ChunkedFwRecurrentBwRWKV6PlusFunction.apply(r, k, v, w, u, scale, initial_state, output_final_state)
+    o, final_state = ChunkedFwRecurrentBwRWKV6PlusFunction.apply(r, k, v, g, u, scale, initial_state, output_final_state, checkpoint_level)
     return o, final_state
