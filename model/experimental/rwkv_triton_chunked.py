@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-
-# Copyright (c) 2023-2024, Yu Zhang, Songlin Yang
-
-from typing import Optional, Tuple
-
-import torch
-import triton
-import triton.language as tl
-
-from fla.ops.utils import chunk_reversed_cumsum_fwd
-from fla.utils import contiguous
-
 
 @triton.autotune(
     configs=[
@@ -788,13 +775,13 @@ def chunk_rwkv6(
     r: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
+    w: torch.Tensor,
     u: torch.Tensor,
     scale: Optional[int] = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     checkpoint_level: Optional[int] = 0
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         r (torch.Tensor):
@@ -825,5 +812,5 @@ def chunk_rwkv6(
         scale = r.shape[-1] ** -0.5
     if initial_state is not None:
         initial_state = initial_state.detach()
-    o, final_state = ChunkRWKV6Function.apply(r, k, v, g, u, scale, initial_state, output_final_state, checkpoint_level)
+    o, final_state = ChunkRWKV6Function.apply(r, k, v, w, u, scale, initial_state, output_final_state, checkpoint_level)
     return o, final_state

@@ -3,6 +3,7 @@ import torch as th
 import torch.nn.functional as F
 
 from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
+from fla.ops.rwkv6.chunked import chunk_rwkv6
 # from fla.ops.rwkv_6.recurrent_fuse import fused_recurrent_rwkv6
 
 
@@ -199,11 +200,11 @@ def test_rwkv():
             # [1 * 1024, 4 * 512, 4 * 1], 
         ],
         line_arg="method",
-        line_vals=["torch", "triton"],
-        line_names=["Torch", "Triton"],
-        styles=[("red", "-"), ("green", "-")],
+        line_vals=["torch_chunked", "triton_recurrent", "triton_chunked"],
+        line_names=["Torch", "Triton Recurrent", "Triton Chunked"],
+        styles=[("red", "-"), ("green", "-"), ("blue", "-")],
         ylabel="time, ms",
-        plot_name="RWKV6 kernel Torch chunked vs Triton sequential",
+        plot_name="RWKV6 kernel Torch chunked vs Triton sequential vs Triton Chunked",
         args={},
     ),
 )
@@ -218,10 +219,16 @@ def benchmark(H, L, KH, method):
 
     def step():
         match method:
-            case "triton":
+            case "triton_recurrent":
                 with th.enable_grad():
                     wt_ = th.log(th.sigmoid(wt)) # F.logsigmoid(wt)
                     ot, state = fused_recurrent_rwkv6(rt, kt, vt, wt_, ut, scale=1.0)
+                    ot = ot.mean()
+                ot.backward()
+            case "triton_chunked":
+                with th.enable_grad():
+                    wt_ = th.log(th.sigmoid(wt))  # F.logsigmoid(wt)
+                    ot, state = chunk_rwkv6(rt, kt, vt, wt_, ut, scale=1.0)
                     ot = ot.mean()
                 ot.backward()
             case "torch":
