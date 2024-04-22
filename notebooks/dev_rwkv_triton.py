@@ -293,6 +293,6 @@ if __name__ == "__main__":
     B, H, L, K, V = 1, 1, 16, 256, 256
     # test_v7(B, H, L, K, V)
     # test_chunked_v6plus(B, H, L, K, V)
-    B, H, L, K, V = 1, 1, 32, 4, 4
+    B, H, L, K, V = 1, 1, 32, 2, 2
     test_chunked_v6plusplus(B, H, L, K, V)
 

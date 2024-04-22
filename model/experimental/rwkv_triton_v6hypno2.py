@@ -186,8 +186,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
                tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
     p_dz = dz + i_bh * DK * DV + \
-          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
-          (i_v * BV + tl.arange(0, BV)[:, None])
+          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[None, :])
     p_w = w + i_bh * s_qk_h + i_k * BK + \
           tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
 
@@ -224,12 +224,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
         _w = tl.exp(_w)
         h_q = h * _do[:, None]
-        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
+        _dq = tl.sum(h_q * _z + _kv * _u * _do[:, None], axis=0)
         _dq *= scale
-        _dq_aux = tl.sum(h_q, axis=0)
+        _dq_aux = tl.sum(h_q * _z, axis=0)
         _dz += h_q * _q[None, :]
         h = h * _w[None, :]
-        h += _kv * _z
+        h += _kv
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
         tl.store(p_dq_aux, _dq_aux.to(p_dq_aux.dtype.element_ty), mask=mask_bk)
 
@@ -240,7 +240,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         p_dq += -DK if REVERSE else DK
         p_dq_aux += -DK if REVERSE else DK
 
-    tl.store(p_dz, _dz.to(p_dz.dtype.element_ty), mask=mask_kv)
+    tl.store(p_dz, (_dz.T).to(p_dz.dtype.element_ty), mask=mask_kv)
 
 
 @triton.jit
@@ -455,11 +455,12 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dk_aux = dk_aux.sum(0).to(w)
 
         qscale = q * scale
-        dw = z[:, :, None] * (dq_aux * qscale)[:, :, 1:] - (dk_aux * k)[:, :, 0:-1]
+        dw = (dq_aux * qscale)[:, :, 1:] - (dk_aux * k)[:, :, 0:-1]
         dw = torch.nn.functional.pad(dw, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
         dw = chunk_reversed_cumsum_fwd(dw).to(w)
         if initial_state is None:
             dw[:, :, 0] = 0.
+        dw = dw  # * z[:, :, None]
 
         du = torch.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
         # du = ((do*dv)[:, :, :, None] * (k * q * scale)[..., None]).sum((0, 2)).to(u)
