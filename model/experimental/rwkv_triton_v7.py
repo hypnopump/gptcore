@@ -167,7 +167,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     # vector W
     # p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
     #     tl.arange(0, BK) + ((T-1) * DK if REVERSE else 0)
-    p_dq_aux = dq_aux + i_v * i_k * i_bh * s_qk_h * DV + \
+    p_dq_aux = dq_aux + i_bh * s_qk_h * DV + \
                (i_k * BK + tl.arange(0, BK))[None, :] * DV + \
                (i_v * BV + tl.arange(0, BV))[:, None] + \
                ((T - 1) * DK * DV if REVERSE else 0)
@@ -279,7 +279,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     # vector W
     # p_dk_aux = dk_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * \
     #     BK + tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
-    p_dk_aux = dk_aux + i_v * i_k * i_bh * s_qk_h * DV + \
+    p_dk_aux = dk_aux + i_bh * s_qk_h * DV + \
                (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
                (i_v * BV + tl.arange(0, BV)[None, :]) + \
                ((T - 1) * DK * DV if not REVERSE else 0)
@@ -404,7 +404,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
         # FIXME: beware we have indexing problems and
         # FIXME: this numbers determine the max head size we can take
-        BB_DV = BB = 32
+        BB_DV = BB = 16
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 16), min(triton.next_power_of_2(d_head_v), BB_DV)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)

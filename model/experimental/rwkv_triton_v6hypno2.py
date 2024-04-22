@@ -132,6 +132,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         do,  # gradient of output [B, H, L, D_head_V]
         dq,  # gradient of query [NV, B, H, L, D_head_K]
         dq_aux,  # gradient of query_aux [NV, B, H, L, D_head_K]
+        dz,  # gradient of filter [NV, NK, B, H, D_head_K, D_head_V]
 
         # initial hidden state initialization [B, H, D_head_K, D_head_V]
         initial_state,
@@ -167,6 +168,16 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
            tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
     p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
                tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
+
+    # lol
+    p_w = w + i_bh * s_qk_h * DV + \
+          (i_k * BK + tl.arange(0, BK)[None, :]) * DV + \
+          (i_v * BV + tl.arange(0, BV)[:, None]) + \
+          ((T - 1) * DK * DV if REVERSE else 0)
+
+    p_dz = dz + i_h * DK * DV + \
+          (i_k * BK + tl.arange(0, BK)[:, None]) * \
+          DV + (i_v * BV + tl.arange(0, BV)[None, :])
     p_w = w + i_bh * s_qk_h + i_k * BK + \
           tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
 
@@ -382,10 +393,11 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dq = q.new_empty(NV, batch_size, n_heads, seq_len,
                          d_head_qk, dtype=torch.float32)
         dq_aux = torch.empty_like(dq)
+        dz = z.new_zeros(NV, NK, batch_size, n_heads, d_head_qk, d_head_v)
         grid = (NV, NK, batch_size * n_heads)
 
         fused_recurrent_rwkv6_bwd_kernel_dq[grid](
-            k, v, w, u, do, dq, dq_aux, initial_state,
+            k, v, w, u, do, dq, dq_aux, dz, initial_state,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
             batch_size, n_heads, seq_len, scale,
@@ -426,7 +438,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dk_aux = dk_aux.sum(0).to(w)
 
         qscale = q * scale
-        dw = (dq_aux * qscale)[:, :, 1:] - (dk_aux * k)[:, :, 0:-1]
+        dw = z * (dq_aux * qscale)[:, :, 1:] - (dk_aux * k)[:, :, 0:-1]
         dw = torch.nn.functional.pad(dw, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
         dw = chunk_reversed_cumsum_fwd(dw).to(w)
         if initial_state is None:
