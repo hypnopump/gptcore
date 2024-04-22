@@ -147,7 +147,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         do,  # gradient of output [B, H, L, D_head_V]
         dq,  # gradient of query [NV, B, H, L, D_head_K]
         dq_aux,  # gradient of query_aux [NV, B, H, L, D_head_K]
-        dz,  # gradient of filter [NV, NK, B, H, D_head_K, D_head_V]
 
         # initial hidden state initialization [B, H, D_head_K, D_head_V]
         initial_state,
@@ -185,9 +184,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
            tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
     p_dq_aux = dq_aux + (i_bh + i_v * B * H) * s_qk_h + i_k * BK + \
                tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
-    p_dz = dz + i_bh * DK * DV + \
-          (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
-          (i_v * BV + tl.arange(0, BV)[None, :])
     p_w = w + i_bh * s_qk_h + i_k * BK + \
           tl.arange(0, BK) + ((T - 1) * DK if REVERSE else 0)
 
@@ -204,10 +200,10 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
     mask_kv = mask_bk[:, None] & mask_bv[None, :]
+
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32).T
     _z = tl.load(p_z, mask=mask_kv, other=0).to(tl.float32).T
     h = tl.zeros([BV, BK], dtype=tl.float32)
-    _dz = tl.zeros([BV, BK], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
         p_init_s = initial_state + i_bh * DK * DV + \
@@ -227,7 +223,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _dq = tl.sum(h_q * _z + _kv * _u * _do[:, None], axis=0)
         _dq *= scale
         _dq_aux = tl.sum(h_q * _z, axis=0)
-        _dz += h_q * _q[None, :]
         h = h * _w[None, :]
         h += _kv
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
@@ -239,8 +234,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         p_w += -DK if REVERSE else DK
         p_dq += -DK if REVERSE else DK
         p_dq_aux += -DK if REVERSE else DK
-
-    tl.store(p_dz, (_dz.T).to(p_dz.dtype.element_ty), mask=mask_kv)
 
 
 @triton.jit
@@ -258,6 +251,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         dk,
         dk_aux,
         dv,
+        dz,
 
         # initial hidden state initialization [B, H, D_head_K, D_head_V]
         s_qk_h,  # stride size: L * D_head_K
@@ -297,7 +291,10 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
            BV + tl.arange(0, BV) + ((T - 1) * DV if not REVERSE else 0)
     p_w = w + i_bh * s_qk_h + i_k * BK + \
           tl.arange(0, BK) + ((T - 1) * DK if not REVERSE else 0)
+
+
     d_h = tl.zeros([BK, BV], dtype=tl.float32)
+    d_z = tl.zeros([BK, BV], dtype=tl.float32)
     mask_bk = i_k * BK + tl.arange(0, BK) < DK
     mask_bv = i_v * BV + tl.arange(0, BV) < DV
     mask_kv = mask_bk[:, None] & mask_bv[None, :]
@@ -309,6 +306,9 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     p_z = z + i_h * DK * DV + \
           (i_k * BK + tl.arange(0, BK)[:, None]) * \
           DV + (i_v * BV + tl.arange(0, BV)[None, :])
+    p_dz = dz + i_bh * DK * DV + \
+           (i_k * BK + tl.arange(0, BK)[:, None]) * DV + \
+           (i_v * BV + tl.arange(0, BV)[None, :])
 
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
     _z = tl.load(p_z, mask=mask_kv, other=0).to(tl.float32)
@@ -319,15 +319,17 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _dkv = _q[:, None] * _do[None, :]
-        d_k = tl.sum(d_h * _v[None, :], axis=1)
+        d_hz = d_h * _z
+        d_k = tl.sum(d_hz * _v[None, :], axis=1)
         tl.store(p_dk_aux, d_k.to(p_dk_aux.dtype.element_ty), mask=mask_bk)
         d_k += tl.sum(_dkv * _u * _v[None, :], axis=1)
-        d_v = tl.sum((d_h + (_dkv * _u)) * _k[:, None], axis=0)
+        d_v = tl.sum((d_hz + (_dkv * _u)) * _k[:, None], axis=0)
 
+        d_z += d_h * _v[None, :] * _k[:, None]
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
         _w = tl.exp(_w)
         d_h *= _w[:, None]
-        d_h += _dkv * _z
+        d_h += _dkv
 
         tl.store(p_dk, d_k.to(p_dk.dtype.element_ty), mask=mask_bk)
         tl.store(p_dv, d_v.to(p_dv.dtype.element_ty), mask=mask_bv)
@@ -340,6 +342,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         p_dk_aux += DK if REVERSE else -DK
         p_dv += DV if REVERSE else -DV
         p_w += DK if REVERSE else -DK
+
+    tl.store(p_dz, d_z.to(p_dz.dtype.element_ty), mask=mask_kv)
 
 
 class FusedRecurrentRWKV6Function(torch.autograd.Function):
@@ -409,11 +413,10 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dq = q.new_empty(NV, batch_size, n_heads, seq_len,
                          d_head_qk, dtype=torch.float32)
         dq_aux = torch.empty_like(dq)
-        dz = z.new_zeros(NV, NK, batch_size, n_heads, d_head_qk, d_head_v)
         grid = (NV, NK, batch_size * n_heads)
 
         fused_recurrent_rwkv6_bwd_kernel_dq[grid](
-            q, k, v, w, u, z, do, dq, dq_aux, dz, initial_state,
+            q, k, v, w, u, z, do, dq, dq_aux, initial_state,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
             batch_size, n_heads, seq_len, scale,
@@ -425,7 +428,6 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         )
         dq = dq.sum(0).to(q)
         dq_aux = dq_aux.sum(0).to(w)
-        dz = dz.sum((0, 1, 2)).to(z)
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), 32)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
@@ -437,10 +439,12 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
                              d_head_qk, dtype=torch.float32)
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
                          d_head_v, dtype=torch.float32)
+        dz = z.new_zeros(NK, NV, batch_size, n_heads, d_head_qk, d_head_v, dtype=torch.float32)
+
         grid = (NV, NK, batch_size * n_heads)
 
         fused_recurrent_rwkv6_bwd_kernel_dkv[grid](
-            q, k, v, w, u, z, do, dk, dk_aux, dv,
+            q, k, v, w, u, z, do, dk, dk_aux, dv, dz,
             q.stride(1), q.stride(2), q.stride(3),
             v.stride(1), v.stride(2), v.stride(3),
             batch_size, n_heads, seq_len, scale,
@@ -453,6 +457,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dk = dk.sum(0).to(k)
         dv = dv.sum(0).to(v)
         dk_aux = dk_aux.sum(0).to(w)
+        dz = dz.sum((0, 1, 2)).to(z)
 
         qscale = q * scale
         dw = (dq_aux * qscale)[:, :, 1:] - (dk_aux * k)[:, :, 0:-1]
