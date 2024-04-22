@@ -26,6 +26,9 @@ from .rwkv_inner import rwkv_inner, rwkv_inner_umat
 from .rwkv_triton_v6hypno import fused_recurrent_rwkv6hypno
 # supports both Umat and Wmat
 from .rwkv_triton_v7 import fused_recurrent_rwkv7hypno
+# supports Umat ^ Zmat
+from .rwkv_triton_v6hypno2 import fused_recurrent_rwkv6hypno2
+
 # base RWKV6. chunked is significantly faster (80ktok/s vs 50ktok/s on uncompiled L8D512H8; seq_len=1024; A100)
 from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
 from fla.ops.rwkv6.chunk import chunk_rwkv6
@@ -140,7 +143,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = True  # True
+        self.umat = True   # True
+        self.zmat = True   # True
         self.wmat = False  # True
         self.k_one_minus_w = True
 
@@ -202,6 +206,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                 self.time_first = nn.Parameter(time_first) # (KVH, K, K)
             else: 
                 self.time_first = nn.Parameter(time_first[..., 0]) # (KVH, K)
+
+            self.time_filter = nn.Parameter(1 + 1e-5 * torch.randn(self.n_kv_head, self.k_head_size, self.v_head_size))
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
         self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
@@ -314,10 +320,15 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                 # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
                 # out, s = rwkv7_recurrent(r, k, v, w, u, kv_state)
             else:
-                # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 40 ktok/s || chunked = ???
-                out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-                # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-                # out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
+                if self.zmat:
+                    time_filter = self.time_filter.float() # (KVH,K,V)
+                    z = time_filter.view(H,K,V)
+                    out, s = fused_recurrent_rwkv6hypno2(r, k, v, w, u, z, initial_state=kv_state, scale=1.0)
+                else:
+                    # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 40 ktok/s || chunked = ???
+                    out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+                    # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+                    # out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
         else:
             # torch + th.compile = 200 ktok/s || torch+fcompile = 80 ktok/s || torch = 70 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
             kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
