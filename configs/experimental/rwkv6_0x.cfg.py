@@ -48,7 +48,10 @@ cli.Config(
             # feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
             feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
             # residual_op_factory=lambda: model.core.ResidualAddOp(),
+
+            # TODO: try:
             residual_op_factory=lambda: model.core.ResidualPartialMixOp(),
+            # residual_op_factory=lambda: model.core.ResidualPhiMixOp(),
         ),
     ),
 

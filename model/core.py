@@ -297,6 +297,17 @@ class ResidualPartialMixOp(TransformerLayerPart, IResidualOp):
     def forward(self, x : Tensor, sublayer, layer_recurrent_memory : Optional[Tensor] = None):
         return x + self.dropout(sublayer(self.norm(x))) * (2 - self.residual_mix)
 
+class ResidualPhiMixOp(TransformerLayerPart, IResidualOp):
+    def __init__(self, sublayer_norm_factory : Callable[..., nn.Module] = Factory(norm.RMSNorm, weight_scaling = False)):
+        super().__init__()
+        hparams = self.hparams
+        self.dropout = nn.Dropout(hparams.dropout)
+        self.norm = sublayer_norm_factory(hparams.d_model)
+        self.residual_mix = nn.Parameter(torch.ones(1,1,hparams.d_model))
+
+    def forward(self, x : Tensor, sublayer, layer_recurrent_memory : Optional[Tensor] = None):
+        return x * (F.elu(self.residual_mix) + 1) + self.dropout(sublayer(self.norm(x))) * (2 - self.residual_mix)
+
 class ResidualMixOp(TransformerLayerPart, IResidualOp):
     def __init__(self, sublayer_norm_factory : Callable[..., nn.Module] = Factory(norm.RMSNorm, weight_scaling = False)):
         super().__init__()
