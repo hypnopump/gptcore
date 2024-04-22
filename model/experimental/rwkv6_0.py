@@ -142,7 +142,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         args = RWKVConfig(hparams)
         self.umat = True  # True
         self.wmat = False  # True
-        self.k_one_minus_w = False
+        self.k_one_minus_w = True
 
         self.args = args
         self.layer_id = layer_id
@@ -287,7 +287,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         # if r.dtype == torch.bfloat16 and kv_state.dtype != torch.bfloat16:
         #     kv_state = kv_state.contiguous().to(torch.bfloat16)
 
-        eps = 1e-3
+        eps = 1e-5
         if self.wmat:
             w = time_decay.view(1, H, 1, K, V)
             w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2)  # BHTK()
@@ -315,9 +315,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                 # out, s = rwkv7_recurrent(r, k, v, w, u, kv_state)
             else:
                 # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 40 ktok/s || chunked = ???
-                # out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-                kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-                out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
+                out, s = fused_recurrent_rwkv6hypno(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+                # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+                # out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
         else:
             # torch + th.compile = 200 ktok/s || torch+fcompile = 80 ktok/s || torch = 70 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
             kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
