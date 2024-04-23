@@ -22,7 +22,7 @@ MAX_SEQUENCE_LENGTH = 1024
 LOG_PROJECT = 'gptcore_memtention'
 LOG_NAME = 'RWKV6.0xFLA_Umat_k=1-w_Elu+1MixOp L8D512H2CM3Adam'
 LOG_NAME = 'RWKV6.0xFLA_UZmat_k=1-w L8D512H2CM3Adam'
-LOG_NAME = 'RWKV6.0xFLA_UWmat L8D512H2CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_HypnoFFN_elu2 L8D512H2CM3Adam'
 
 
 
@@ -38,7 +38,7 @@ cli.Config(
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
             n_layer=8,
-            n_head=8,
+            n_head=2,
             d_model=512,
 
             feedforward_d_model_ratio=3,
@@ -51,7 +51,9 @@ cli.Config(
         layer_factory=lambda: model.core.TransformerLayer(
             self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
             # feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
-            feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+            # feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+            feedforward_sublayer_factory = lambda: model.experimental.rwkv6_0.HypnoFeedForwardSubLayer(),
+            
             # underperform
             # residual_op_factory=lambda: model.core.ResidualAddOp(),
             # residual_op_factory=lambda: model.core.ResidualPartialMixOp(),

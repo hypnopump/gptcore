@@ -16,10 +16,14 @@ from typing import Callable, Any, Optional, Tuple, List, Iterable, Callable
 import math
 
 import torch
+import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
 from torch import Tensor
+
+from model.core import TransformerLayerPart, TimeLerp, ReluSquared
+from model.interface import IFeedForwardSubLayer
 
 from .rwkv_inner import rwkv_inner, rwkv_inner_umat
 # supports Umat, not Wmat
@@ -143,9 +147,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = True   # True
+        self.umat = False   # True
         self.zmat = False  # True
-        self.wmat = True   # True
+        self.wmat = False   # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -331,13 +335,13 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                     # out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
         else:
             # torch + th.compile = 200 ktok/s || torch+fcompile = 80 ktok/s || torch = 70 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
-            kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-            u = time_first.view(1,H,1,K)
-            out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
+            # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+            # u = time_first.view(1,H,1,K)
+            # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
 
-            # u = time_first.view(H,K)
+            u = time_first.view(H,K)
             # out, s = fused_recurrent_rwkv6(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-            # out, s = chunk_rwkv6(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
+            out, s = chunk_rwkv6(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
 
 
         out = out.transpose(1,2).reshape(B*T, H*V)
@@ -349,3 +353,110 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             out = out[..., :-n_padding, :]  # BTC
 
         return out
+
+
+class DDLorExp(TransformerLayerPart):
+    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int, bias: bool = False, init_w: float = 1.):
+        super().__init__()
+        """ Data-dependent low-rank exponential """
+        self.in_dim = in_dim
+        self.hidden_dim = hidden_dim
+        self.out_dim = out_dim
+        self.bias = bias
+
+        self.w1 = th.nn.Parameter(th.empty(in_dim, hidden_dim).uniform_(-0.01, 0.01))
+        self.w2 = th.nn.Parameter(th.zeros(hidden_dim, out_dim))
+        self.gmult = th.nn.Parameter(init_w * th.ones(out_dim))
+        if self.bias:
+            self.gbias = th.nn.Parameter(th.zeros(out_dim))
+
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        glora = (th.tanh(x @ self.w1) @ self.w2)
+        gate = self.gmult.to(glora) * glora.exp()
+        if self.bias:
+            gate = gate + self.gbias.to(gate)
+        return gate
+    
+
+class DDLorElu2(TransformerLayerPart):
+    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int, bias: bool = False, init_w: float = 1.):
+        super().__init__()
+        """ Data-dependent low-rank exponential """
+        self.in_dim = in_dim
+        self.hidden_dim = hidden_dim
+        self.out_dim = out_dim
+        self.bias = bias
+
+        self.w1 = th.nn.Parameter(th.empty(in_dim, hidden_dim).uniform_(-0.01, 0.01))
+        self.w2 = th.nn.Parameter(th.zeros(hidden_dim, out_dim))
+        self.gmult = th.nn.Parameter(init_w * th.ones(out_dim))
+        if self.bias:
+            self.gbias = th.nn.Parameter(th.zeros(out_dim))
+
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        glora = (th.tanh(x @ self.w1) @ self.w2)
+        elug = F.elu(glora) 
+        elu2 = th.where(glora < 0., elug, (x+0.5).square()+0.75)
+        gate = self.gmult.to(glora) * elu2
+        if self.bias:
+            gate = gate + self.gbias.to(gate)
+        return gate
+
+
+class RWKVFeedForwardSubLayer(TransformerLayerPart, IFeedForwardSubLayer):
+    def __init__(self, 
+                 hidden_activation_factory : Callable = Factory(ReluSquared), 
+                 gate_activation_factory : Callable = Factory(th.nn.Sigmoid),
+                 time_mixer_factory : Callable = Factory(TimeLerp)):
+        super().__init__()
+        D = self.hparams.d_model
+        F = int(self.hparams.feedforward_d_model_ratio * self.hparams.d_model)
+        self.time_mixer_hidden = time_mixer_factory()
+        self.time_mixer_gate = time_mixer_factory()
+        self.w_hidden = th.nn.Linear(D, F, bias=False)
+        self.hidden_activation = hidden_activation_factory()
+        self.w_out = th.nn.Linear(F, D, bias=False)
+        self.w_gate = th.nn.Linear(D, D, bias=False)
+        self.gate_activation = gate_activation_factory()
+
+    def forward(self, x : th.Tensor):
+        x_hidden = self.time_mixer_hidden(x)
+        x_gate = self.time_mixer_gate(x)
+        hidden = self.w_hidden(x_hidden)
+        hidden = self.hidden_activation(hidden)
+
+        # FIXME - try this, there was a paper that claimed it was better!
+        # hidden = norm.RMSNorm.F(hidden)
+
+        gate = self.w_gate(x_gate)
+        gate = self.gate_activation(gate)
+        return gate * self.w_out(hidden)
+
+
+class HypnoFeedForwardSubLayer(TransformerLayerPart, IFeedForwardSubLayer):
+    def __init__(self, 
+                 hidden_activation_factory : Callable = Factory(ReluSquared), 
+                 gate_activation_factory : Callable = Factory(th.nn.Sigmoid),
+                 time_mixer_factory : Callable = Factory(TimeLerp)):
+        super().__init__()
+        """ Warning! Should be used with wider (3 -> 3.5 hidden dim than baseline) """
+        D = self.hparams.d_model
+        F = int(self.hparams.feedforward_d_model_ratio * self.hparams.d_model)
+        self.time_mixer_hidden = time_mixer_factory()
+
+        self.w_hidden = th.nn.Linear(D, F, bias=False)
+        self.hidden_activation = hidden_activation_factory()
+        self.w_out = th.nn.Linear(F, D, bias=False)
+        GATE_EXP_DIM = 64
+        self.w_gate = DDLorExp(in_dim=D, hidden_dim=GATE_EXP_DIM, out_dim=D)
+
+    def forward(self, x : th.Tensor):
+        x_hidden = self.time_mixer_hidden(x)
+
+        hidden = self.w_hidden(x_hidden)
+        hidden = self.hidden_activation(hidden)
+
+        gate = self.w_gate(x_hidden)
+        return gate * self.w_out(hidden)

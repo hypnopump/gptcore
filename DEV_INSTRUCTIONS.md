@@ -18,7 +18,7 @@ sudo docker run -td --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=671
 sudo docker ps
 sudo nvidia-smi -lgc 210,1500
 
-export CONTAINER_NAME="pensive_swirles"
+export CONTAINER_NAME="beautiful_snyder"
 sudo docker exec -it $CONTAINER_NAME /bin/bash
 
 # sudo docker kill $CONTAINER_NAME 
@@ -29,7 +29,7 @@ cd Desktop/projects/gptcore_private/
 
 pip install -r requirements.txt
 pip install lightning deepspeed einops transformers datasets wandb torchdata schedulefree
-pip install triton==2.3.0 matplotlib
+pip install triton==2.2.0 matplotlib
 # commit: 904708643a7d018a9cc71c60159ed4bc597ae307 # last tested
 pip install -e flash-linear-attention/.
 
@@ -60,6 +60,7 @@ python cli.py train -c configs/experimental/gptab_hypno.cfg.py
 
 # repro rwkv6_0x
 python cli.py train -c "configs/experimental/rwkv6_0x_(k=1-w).cfg.py"
+python cli.py train -c "configs/experimental/rwkv6_0x.cfg.py"
 
 # repro rwkv5
 python cli.py train -c configs/experimental/rwkv5_2x.cfg.py
