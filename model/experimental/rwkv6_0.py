@@ -144,9 +144,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         args = RWKVConfig(hparams)
         self.umat = True   # True
-        self.zmat = True   # True
-        self.wmat = False  # True
-        self.k_one_minus_w = True
+        self.zmat = False  # True
+        self.wmat = True   # True
+        self.k_one_minus_w = False
 
         self.args = args
         self.layer_id = layer_id
