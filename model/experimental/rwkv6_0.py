@@ -218,8 +218,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         self.rotary_positional_embedding = hparams.rotary_positional_embedding_factory(hparams.max_sequence_length, int(hparams.d_qk_ratio * hparams.d_model / hparams.n_head))
 
-        # self.ln_x = nn.GroupNorm(self.n_kv_head, args.dim_v)
-        self.ln_x = nn.LayerNorm(args.dim_v)
+        self.ln_x = nn.GroupNorm(self.n_kv_head, args.dim_v)
+        # self.ln_x = nn.LayerNorm(args.dim_v)
 
     def post_init_fn(self, myself):
         zero = [self.output]

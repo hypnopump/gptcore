@@ -465,6 +465,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dv = dv.sum(0).to(v)
         dk_aux2 = dk_aux.sum((0, 1)).to(w)
         del dk_aux
+        # TODO: fuse dq, dk aux into loops. fuse reverse cumsum into dk as well
 
         B, H, L, K, V = batch_size, n_heads, seq_len, d_head_qk, d_head_v
         # dw = (dq_aux * qscale[..., None])[:, :, 1:] - (k[..., None] * dk_aux)[:, :, :-1]
