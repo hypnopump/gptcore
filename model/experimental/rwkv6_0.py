@@ -143,9 +143,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = True   # True
-        self.zmat = False  # True
-        self.wmat = True   # True
+        self.umat = False   # True
+        self.zmat = False   # True
+        self.wmat = False   # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -218,7 +218,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         self.rotary_positional_embedding = hparams.rotary_positional_embedding_factory(hparams.max_sequence_length, int(hparams.d_qk_ratio * hparams.d_model / hparams.n_head))
 
-        self.ln_x = nn.GroupNorm(self.n_kv_head, args.dim_v)
+        # self.ln_x = nn.GroupNorm(self.n_kv_head, args.dim_v)
+        self.ln_x = nn.LayerNorm(args.dim_v)
 
     def post_init_fn(self, myself):
         zero = [self.output]
@@ -331,17 +332,20 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                     # out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
         else:
             # torch + th.compile = 200 ktok/s || torch+fcompile = 80 ktok/s || torch = 70 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
-            kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-            u = time_first.view(1,H,1,K)
-            out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
+            # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+            # u = time_first.view(1,H,1,K)
+            # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
 
-            # u = time_first.view(H,K)
+            u = time_first.view(H, K)
             # out, s = fused_recurrent_rwkv6(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-            # out, s = chunk_rwkv6(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
+            out, s = chunk_rwkv6(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
 
 
         out = out.transpose(1,2).reshape(B*T, H*V)
-        out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)
+        out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V) # - self.ln_x.bias
+        g=1.
+        # out = out.transpose(1, 2).reshape(B*T, H*V)
+        # out = self.ln_x(out).view(B, T, H*V)
 
         out = self.output(out * g)
 

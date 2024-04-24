@@ -32,6 +32,7 @@ pip install lightning deepspeed einops transformers datasets wandb torchdata sch
 pip install triton==2.3.0 matplotlib
 # commit: 904708643a7d018a9cc71c60159ed4bc597ae307 # last tested
 pip install -e flash-linear-attention/.
+export HF_DATASETS_OFFLINE=1
 
 apt-get update
 apt-get install -y tmux
