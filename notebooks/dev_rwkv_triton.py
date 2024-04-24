@@ -179,7 +179,7 @@ def test_chunked_v6plus(B, H, L, K, V):
         print(f"k:{k} {grads[k] - grad2[k]}")
 
 
-def test_chunked_v6plusplus(B, H, L, K, V):
+def test_v6plusplus(B, H, L, K, V):
     # B, H, L, K, V = 1, 1, 128, 256, 256
     def gen_inputs():
         th.manual_seed(17)
@@ -290,9 +290,10 @@ def test_v7(B, H, L, K, V):
 #######################################
 
 if __name__ == "__main__":
-    B, H, L, K, V = 1, 1, 16, 256, 256
+    B, H, L, K, V = 1, 1, 16, 8, 8
+    test_v6plusplus(B, H, L, K, V)
     # test_v7(B, H, L, K, V)
     # test_chunked_v6plus(B, H, L, K, V)
-    B, H, L, K, V = 1, 1, 32, 512, 512
-    test_chunked_v6plusplus(B, H, L, K, V)
+    # B, H, L, K, V = 1, 1, 32, 512, 512
+    # test_v6plusplus(B, H, L, K, V)
 

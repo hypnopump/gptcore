@@ -386,6 +386,8 @@ class DDLorExp(TransformerLayerPart):
     def forward(self, x: th.Tensor) -> th.Tensor:
         glora = (th.tanh(x @ self.w1) @ self.w2)
         gate = self.gmult.to(glora) * glora.exp()
+        # gate = self.gmult.to(glora) * glora.softmax(dim=-1)
+
         if self.bias:
             gate = gate + self.gbias.to(gate)
         return gate

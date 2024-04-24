@@ -15,6 +15,11 @@ from fla.utils import contiguous
 
 
 def rwkv6hypno2_recurrent(r_in, k_in, v_in, w_in, u, z, kv_state):
+    """
+    * r, k, v : [B, H, N, D]
+    * w_in: [B, H, N, D]
+    * u, z: [H, D, D]
+    """
     B,H,L,K = r_in.shape
     V = v_in.size(-1)
     L = r_in.size(-2)
