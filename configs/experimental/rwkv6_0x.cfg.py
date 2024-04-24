@@ -21,12 +21,12 @@ MAX_SEQUENCE_LENGTH = 1024
 
 
 LOG_PROJECT = 'gptcore_pls'
-LOG_NAME = 'RWKV6.0xFLA_chunk gateLN L8D512H8CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_chunk gateLN_hypnoFFN3x L8D512H8CM3Adam'
 
 
 cli.Config(
     seed_everything = 1337,
-    compile = True,
+    compile = False,
     pretest = False,
 
     model_factory = lambda: model.core.Decoder(
@@ -35,7 +35,7 @@ cli.Config(
             max_sequence_length=MAX_SEQUENCE_LENGTH,
 
             n_layer=8,
-            n_head=2,
+            n_head=8,
             d_model=512,
 
             feedforward_d_model_ratio=3,
@@ -50,7 +50,6 @@ cli.Config(
             # feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
             # feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
             feedforward_sublayer_factory = lambda: model.experimental.rwkv6_0.HypnoFeedForwardSubLayer(),
-            
             # underperform
             # residual_op_factory=lambda: model.core.ResidualAddOp(),
             # residual_op_factory=lambda: model.core.ResidualPartialMixOp(),
@@ -76,7 +75,7 @@ cli.Config(
             log_every_n_steps=20,
             logger = [
                 # lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                # lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
             #devices=1,
             #strategy='ddp',

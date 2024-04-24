@@ -461,7 +461,7 @@ class HypnoFeedForwardSubLayer(TransformerLayerPart, IFeedForwardSubLayer):
         self.w_hidden = th.nn.Linear(D, F, bias=False)
         self.hidden_activation = hidden_activation_factory()
         self.w_out = th.nn.Linear(F, D, bias=False)
-        GATE_EXP_DIM = 64
+        GATE_EXP_DIM = 64 ## D//8
         self.w_gate = DDLorExp(in_dim=D, hidden_dim=GATE_EXP_DIM, out_dim=D)
 
     def forward(self, x : th.Tensor):
