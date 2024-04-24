@@ -20,14 +20,14 @@ TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
 LOG_PROJECT = 'gptcore_pls'
-LOG_NAME = 'RWKV6.0xFLA_chunk L8D512H8CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_chunk gateLN L8D512H8CM3Adam'
 
 
 
 
 cli.Config(
     seed_everything = 1337,
-    compile = False,
+    compile = True,
     pretest = False,
 
     model_factory = lambda: model.core.Decoder(
@@ -75,14 +75,14 @@ cli.Config(
             log_every_n_steps=20,
             logger = [
                 # lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                # lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
             #devices=1,
             #strategy='ddp',
             #strategy="deepspeed_stage_2",
             #strategy='ddp_find_unused_parameters_true',
 
-            deterministic=True,
+            # deterministic=True,
         ),
         datamodule_factory=lambda: dataset.DM(
             dataset_path='dataset/pile.py', 
