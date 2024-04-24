@@ -2,7 +2,7 @@ import numpy as np
 import os
 import torch
 import torch.utils.data
-import torchdata
+# import torchdata
 import typing
 import datasets
 
@@ -32,7 +32,7 @@ import torch.utils.data.datapipes.datapipe
 
 #T = typing.TypeVar("T")
 T_co = typing.TypeVar('T_co', covariant=True)
-class PipedDatasetWrapper(typing.Generic[T_co], torch.utils.data.datapipes.datapipe.IterDataPipe[T_co]):
+class PipedDatasetWrapper(torch.utils.data.datapipes.datapipe.IterDataPipe[T_co], typing.Generic[T_co]):
 #class PipedDatasetWrapper(torchdata.datapipes.iter.IterDataPipe[typing.Any]):
     def __init__(self, dataset : torch.utils.data.Dataset | datasets.DatasetDict | datasets.Dataset | datasets.IterableDatasetDict | datasets.IterableDataset):
         super().__init__()
@@ -75,41 +75,41 @@ class MMapDataset(torch.utils.data.Dataset):
 from typing import Iterator, Optional, TypeVar
 
 from torchdata.datapipes import functional_datapipe
-from torchdata.datapipes.iter import IterDataPipe
-
-#T_co = typing.TypeVar("T_co", covariant=True)
-
-@functional_datapipe("take")
-class TakeIterDataPipe(IterDataPipe[T_co]):
-    """
-    Yield at most the specified number of elements from the source DataPipe.
-
-    Args:
-        source_datapipe: source DataPipe that will be iterated through
-        max_count: the maximum number of elements of ``source_datapipe`` yielded before the pipe ends
-
-    Example:
-        >>> from dataset import functional_datapipe
-        >>> dp = functional_datapipe(range(3))
-        >>> dp = dp.take(2)
-        >>> list(dp)
-        [0, 1]
-    """
-
-    def __init__(self, source_datapipe: IterDataPipe[T_co], max_count: int) -> None:
-        self.source_datapipe: IterDataPipe[T_co] = source_datapipe
-        self.max_count: int = max_count
-        self.count: int = 0
-
-    def __iter__(self) -> Iterator[T_co]:
-        for element in self.source_datapipe:
-            yield element
-            self.count += 1
-            if self.count >= self.max_count:
-                return
-
-    def __len__(self) -> int:
-        return min(self.max_count, len(self.source_datapipe))
+# # from torchdata.datapipes.iter import IterDataPipe
+#
+# #T_co = typing.TypeVar("T_co", covariant=True)
+#
+# @functional_datapipe("take")
+# class TakeIterDataPipe(IterDataPipe[T_co]):
+#     """
+#     Yield at most the specified number of elements from the source DataPipe.
+#
+#     Args:
+#         source_datapipe: source DataPipe that will be iterated through
+#         max_count: the maximum number of elements of ``source_datapipe`` yielded before the pipe ends
+#
+#     Example:
+#         >>> from dataset import functional_datapipe
+#         >>> dp = functional_datapipe(range(3))
+#         >>> dp = dp.take(2)
+#         >>> list(dp)
+#         [0, 1]
+#     """
+#
+#     def __init__(self, source_datapipe: IterDataPipe[T_co], max_count: int) -> None:
+#         self.source_datapipe: IterDataPipe[T_co] = source_datapipe
+#         self.max_count: int = max_count
+#         self.count: int = 0
+#
+#     def __iter__(self) -> Iterator[T_co]:
+#         for element in self.source_datapipe:
+#             yield element
+#             self.count += 1
+#             if self.count >= self.max_count:
+#                 return
+#
+#     def __len__(self) -> int:
+#         return min(self.max_count, len(self.source_datapipe))
 
 
 import lightning
