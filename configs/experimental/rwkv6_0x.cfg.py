@@ -20,7 +20,7 @@ TOKENIZER_FACTORY = lambda: transformers.AutoTokenizer.from_pretrained('gpt2')
 MAX_SEQUENCE_LENGTH = 1024
 
 LOG_PROJECT = 'gptcore_pls'
-LOG_NAME = 'RWKV6.0xFLA_chunk_GNbias L8D512H8CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_chunk_GNnobias L8D512H8CM3Adam'
 
 
 
