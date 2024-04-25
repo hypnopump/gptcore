@@ -231,7 +231,7 @@ def test_v6plusplus(B, H, L, K, V):
     for k, v in grads.items():
         print(f"k:{k} {grads[k] - grad2[k]}")
 
-    print(f" and final wt grad is : {wt.grad}")
+    # print(f" and final wt grad is : {wt.grad}")
 
 
 def test_v7(B, H, L, K, V):

@@ -6,6 +6,7 @@
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch.cuda.amp import custom_bwd, custom_fwd
@@ -222,12 +223,13 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         h_q = h * _do[:, None]
         _dq = tl.sum(h_q * _z + _kv * _u * _do[:, None], axis=0)
         _dq *= scale
-        _dq_aux = tl.sum(h_q * _z, axis=0)
+        _dq_aux = tl.sum(h_q * _z, axis=0) * _q * scale
         h = h * _w[None, :]
         h += _kv
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
         tl.store(p_dq_aux, _dq_aux.to(p_dq_aux.dtype.element_ty), mask=mask_bk)
 
+        p_q += -DK if REVERSE else DK
         p_k += -DK if REVERSE else DK
         p_do += -DV if REVERSE else DV
         p_v += -DV if REVERSE else DV
@@ -320,10 +322,10 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _dkv = _q[:, None] * _do[None, :]
         d_hz = d_h * _z
-        d_kaux = tl.sum(d_hz * _v[None, :] * _k[:, None], axis=1)
+        d_kaux = tl.sum(d_hz * _v[None, :], axis=1) * _k
         tl.store(p_dk_aux, d_kaux.to(p_dk_aux.dtype.element_ty), mask=mask_bk)
 
-        _dkvu = d_hz * _dkv * _u
+        _dkvu = d_hz + _dkv * _u
         d_k = tl.sum(_dkvu * _v[None, :], axis=1)
         d_v = tl.sum(_dkvu * _k[:, None], axis=0)
 
@@ -461,15 +463,16 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dk_aux = dk_aux.sum(0).to(w)
         dz = dz.sum((0, 1, 2)).to(z)
 
-        qscale = q * scale
-        dw = (dq_aux * qscale)[:, :, 1:] - (dk_aux * 1)[:, :, 0:-1]
+        # dw = F.pad(dq_aux, (0, 0, -1, 1)) - dk_aux
+
+        # FIXME: old version
+        dw = dq_aux[:, :, 1:] - dk_aux[:, :, 0:-1]
         dw = torch.nn.functional.pad(dw, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
         dw = chunk_reversed_cumsum_fwd(dw).to(w)
         if initial_state is None:
             dw[:, :, 0] = 0.
-        dw = dw  # * z[:, :, None]
 
-        du = torch.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
+        du = torch.einsum('bhnv,bhnk,bhnk->hkv', do * v, q*scale * k)
         # du = ((do*dv)[:, :, :, None] * (k * q * scale)[..., None]).sum((0, 2)).to(u)
 
         # TODO: get gradient expression for dz
