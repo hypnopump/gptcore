@@ -56,6 +56,12 @@ cli.Config(
             # FIXME: test whether it outperforms. so far (300M it does)
             # residual_op_factory=lambda: model.core.ResidualPhiMixOp(),
         ),
+        # layer_factory=lambda: model.core.GradientCheckpointing(
+        #     module_factory=lambda: model.core.TransformerLayer(
+        #         self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
+        #         feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+        #     ),
+        # ),
     ),
 
     trainer_factory = lambda: lit.CoreLightningTrainer(

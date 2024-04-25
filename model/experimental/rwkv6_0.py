@@ -155,9 +155,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = False   # True
+        self.umat = True   # True
         self.zmat = False  # True
-        self.wmat = False   # True
+        self.wmat = True   # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -349,13 +349,13 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
 
             u = time_first.view(H, K)
-            # out, s = fused_recurrent_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-            out, s = chunk_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
+            out, s = fused_recurrent_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+            # out, s = chunk_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
 
 
         out = out.transpose(1,2).reshape(B*T, H*V)
-        # out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V) # - self.ln_x.bias
-        out = self.ln_x(out).view(B, T, H * V) - self.ln_x.bias
+        out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V) - self.ln_x.bias
+        # out = self.ln_x(out).view(B, T, H * V) - self.ln_x.bias
         # g=1.
         # out = out.transpose(1, 2).reshape(B*T, H*V)
         # out = self.ln_x(out).view(B, T, H*V)
