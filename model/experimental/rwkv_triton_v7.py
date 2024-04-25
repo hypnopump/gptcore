@@ -6,6 +6,7 @@ from typing import Tuple
 
 import torch
 import torch as th
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch.cuda.amp import custom_bwd, custom_fwd
@@ -211,19 +212,19 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         h_q = h * _do[:, None]
         _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
         _dq *= scale
-        _dq_aux = h_q * _q[None, :]
+        _dq_aux = h_q * _q[None, :] * scale
         h = h * _w
         h += _kv
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
         tl.store(p_dq_aux, _dq_aux.to(p_dq_aux.dtype.element_ty), mask=mask_kv)
 
+        p_q += -DK if REVERSE else DK
         p_k += -DK if REVERSE else DK
         p_do += -DV if REVERSE else DV
         p_v += -DV if REVERSE else DV
         p_w += (-DK if REVERSE else DK) * DV
         p_dq += -DK if REVERSE else DK
         p_dq_aux += (-DK if REVERSE else DK) * DV
-        p_q += -DK if REVERSE else DK
 
 
 @triton.jit
@@ -305,8 +306,9 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
           (i_v * BV + tl.arange(0, BV)[None, :])
 
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
+    dki_prev = tl.load(p_dk_aux, mask=mask_kv, other=0).to(tl.float32)
 
-    for _ in range(T - 1, -1, -1):
+    for i in range(T - 1, -1, -1):
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
@@ -315,12 +317,18 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         _dui = _dkv * _k[:, None] * _v[None, :]
         d_u += _dui
 
+        if i < T - 1:
+            dki = tl.load(p_dk_aux, mask=mask_kv, other=0).to(tl.float32)
+            d_kaux = dki_prev + dki - d_h * _v[None, :] * _k[:, None]
+            tl.store(p_dk_aux, d_kaux.to(p_dk_aux.dtype.element_ty), mask=mask_kv)
+            dki_prev = d_kaux
+
         # d_k = tl.sum(d_h * _v[None, :], axis=1)
         # tl.store(p_dk_aux, d_k.to(p_dk_aux.dtype.element_ty), mask=mask_kv)
-        d_k_inner = d_h * _v[None, :] * _k[:, None]
-        tl.store(p_dk_aux, d_k_inner.to(p_dk_aux.dtype.element_ty), mask=mask_kv)
+        # d_k_inner = d_h * _v[None, :] * _k[:, None]
+        # tl.store(p_dk_aux, d_k_inner.to(p_dk_aux.dtype.element_ty), mask=mask_kv)
 
-        _dkv_hu = d_h + (_dkv * _u)
+        _dkv_hu = d_h + _dkv * _u
         d_k = tl.sum(_dkv_hu * _v[None, :], axis=1)
         d_v = tl.sum(_dkv_hu * _k[:, None], axis=0)
 
@@ -431,22 +439,22 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             REVERSE=ctx.reverse,
         )
         dq = dq.sum(0).to(q)
-        dq_aux2 = dq_aux.sum((0, 1)).to(w)
-        # only multiply if differen
-        if abs(1 - scale) > 1e-5:
-            dq_aux2.mul_(scale)
+        # dq_aux2 = dq_aux.sum((0, 1)).to(w)
+        dq_aux2 = F.pad(dq_aux, (0, 0, 0, 0, -1, 1))
         del dq_aux
 
-        BK, BV = min(triton.next_power_of_2(d_head_qk), BB_BK_DKV), min(triton.next_power_of_2(d_head_v), BB_BV_DKV)
-        NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
+        # FIXME: hypnopump@ use same grid to avoid stride problems in reused DQ/DK
+        # BK, BV = min(triton.next_power_of_2(d_head_qk), BB_BK_DKV), min(triton.next_power_of_2(d_head_v), BB_BV_DKV)
+        # NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
         dk = q.new_empty(NV, batch_size, n_heads, seq_len,
                          d_head_qk, dtype=torch.float32)
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
                          d_head_v, dtype=torch.float32)
-        dk_aux = w.new_zeros(NV, NK, batch_size, n_heads, seq_len,
-                             d_head_qk, d_head_v, dtype=torch.float32)
+        # dk_aux = w.new_zeros(NV, NK, batch_size, n_heads, seq_len,
+        #                      d_head_qk, d_head_v, dtype=torch.float32)
+        dk_aux = dq_aux2
 
         grid = (NV, NK, batch_size * n_heads)
 
@@ -467,14 +475,16 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         del dk_aux
         # TODO: fuse dq, dk aux into loops. fuse reverse cumsum into dk as well
 
-        B, H, L, K, V = batch_size, n_heads, seq_len, d_head_qk, d_head_v
-        # dw = (dq_aux * qscale[..., None])[:, :, 1:] - (k[..., None] * dk_aux)[:, :, :-1]
-        dw = dq_aux2[:, :, 1:] - dk_aux2[:, :, :-1]
-        # # (b h n dk dv) -> (b h n (dk dv)) -> cumsum -> (b h n dk dv)
-        dw = torch.nn.functional.pad(dw, (0, 0, 0, 0, 0, 1), value=0)
-        dw = dw.reshape(B, H, L, -1)
-        dw = chunk_reversed_cumsum_fwd(dw).to(w)
-        dw = dw.reshape(B, H, L, K, V)
+        dw = dk_aux2
+        # FIXME: old version
+        # B, H, L, K, V = batch_size, n_heads, seq_len, d_head_qk, d_head_v
+        # # dw = (dq_aux * qscale[..., None])[:, :, 1:] - (k[..., None] * dk_aux)[:, :, :-1]
+        # dw = dq_aux2[:, :, 1:] - dk_aux2[:, :, :-1]
+        # # # (b h n dk dv) -> (b h n (dk dv)) -> cumsum -> (b h n dk dv)
+        # dw = torch.nn.functional.pad(dw, (0, 0, 0, 0, 0, 1), value=0)
+        # dw = dw.reshape(B, H, L, -1)
+        # dw = chunk_reversed_cumsum_fwd(dw).to(w)
+        # dw = dw.reshape(B, H, L, K, V)
 
         # first W multiplies an empty state
         if initial_state is None:
@@ -483,7 +493,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         qscale = q
         if abs(1 - scale) > 1e-5:
             qscale = q * scale
-        du = th.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
+        du = th.einsum('bhnv,bhnv,bhnk,bhnk->hkv', do, v, qscale, k)
 
         # du2 = ((do * v)[..., None] * k * q * scale).sum([0, -2]).to(u)
         return dq, dk, dv, dw, du, None, None, None, None
