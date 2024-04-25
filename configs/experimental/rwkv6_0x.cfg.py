@@ -21,7 +21,7 @@ MAX_SEQUENCE_LENGTH = 1024
 
 
 LOG_PROJECT = 'gptcore_pls'
-LOG_NAME = 'RWKV6.0xFLA_chunk gateLN_hypnoFFN3x L8D512H8CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_chunk gateLNnodiv L8D512H8CM3Adam'
 
 
 cli.Config(
@@ -48,8 +48,8 @@ cli.Config(
         layer_factory=lambda: model.core.TransformerLayer(
             self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
             # feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
-            # feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
-            feedforward_sublayer_factory = lambda: model.experimental.rwkv6_0.HypnoFeedForwardSubLayer(),
+            feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+            # feedforward_sublayer_factory = lambda: model.experimental.rwkv6_0.HypnoFeedForwardSubLayer(),
             # underperform
             # residual_op_factory=lambda: model.core.ResidualAddOp(),
             # residual_op_factory=lambda: model.core.ResidualPartialMixOp(),
