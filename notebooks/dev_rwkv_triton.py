@@ -12,7 +12,9 @@ from model.experimental.rwkv_triton_v7 import fused_recurrent_rwkv7hypno
 from model.experimental.rwkv_triton_chunked import chunk_rwkv6
 from model.experimental.rwkv_triton_v6hypno_chunked import chunked_fw_recurrent_bw_rwkv6hypno
 
-# v6hypno2
+# v6hypno (UMat)
+from model.experimental.rwkv_triton_v6hypno import fused_recurrent_rwkv6hypno
+# v6hypno2 (UZMat)
 from model.experimental.rwkv_triton_v6hypno2 import fused_recurrent_rwkv6hypno2, rwkv6hypno2_recurrent
 
 def naive_recurrent_rwkv6(
@@ -179,6 +181,55 @@ def test_chunked_v6plus(B, H, L, K, V):
         print(f"k:{k} {grads[k] - grad2[k]}")
 
 
+def test_v6plus(B, H, L, K, V):
+    # B, H, L, K, V = 1, 1, 128, 256, 256
+    def gen_inputs():
+        th.manual_seed(17)
+        device = "cuda"
+
+        # triton inputs
+        rt = th.randn(B, H, L, K, device=device, requires_grad=True)
+        kt = th.randn(B, H, L, K, device=device, requires_grad=True)
+        vt = th.randn(B, H, L, V, device=device, requires_grad=True)
+        wt = th.randn(B, H, L, K, device=device, requires_grad=True)
+        ut = th.randn(H, K, V, device=device, requires_grad=True)
+        return rt, kt, vt, wt, ut
+
+
+    rt, kt, vt, wt, ut = gen_inputs()
+    w_ = -th.exp(wt)
+    o = naive_recurrent_rwkv6_umat(rt, kt, vt, w_, ut)
+    # print("naive kernel", o)
+    o.mean().backward()
+    grads = {
+        "ut": ut.grad.clone(),
+        "wt": wt.grad.clone(),
+        "rt": rt.grad.clone(),
+        "kt": kt.grad.clone(),
+        "vt": vt.grad.clone()
+    }
+
+    # print("grad of ut", ut.grad)
+
+    rt, kt, vt, wt, ut = gen_inputs()
+    w_ = -th.exp(wt)
+    ot, fstate = fused_recurrent_rwkv6hypno(rt, kt, vt, w_, ut, scale=1)
+    # print("modified kernel", ot)
+    print("native - modified kernel", o - ot)
+
+    ot.mean().backward()
+    # print("fused", ut.grad, rt.grad, kt.grad)
+    grad2 = {
+        "ut": ut.grad.clone(),
+        "wt": wt.grad.clone(),
+        "rt": rt.grad.clone(),
+        "kt": kt.grad.clone(),
+        "vt": vt.grad.clone()
+    }
+    for k, v in grads.items():
+        print(f"k:{k} {grads[k] - grad2[k]}")
+
+
 def test_v6plusplus(B, H, L, K, V):
     # B, H, L, K, V = 1, 1, 128, 256, 256
     def gen_inputs():
@@ -294,7 +345,8 @@ def test_v7(B, H, L, K, V):
 
 if __name__ == "__main__":
     B, H, L, K, V = 1, 1, 16, 8, 8
-    test_v6plusplus(B, H, L, K, V)
+    test_v6plus(B, H, L, K, V)
+    # test_v6plusplus(B, H, L, K, V)
     # test_v7(B, H, L, K, V)
     # test_chunked_v6plus(B, H, L, K, V)
     # B, H, L, K, V = 1, 1, 32, 512, 512
