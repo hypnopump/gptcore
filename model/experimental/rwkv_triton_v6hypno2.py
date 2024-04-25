@@ -314,6 +314,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
     _u = tl.load(p_u, mask=mask_kv, other=0).to(tl.float32)
     _z = tl.load(p_z, mask=mask_kv, other=0).to(tl.float32)
+    dki_prev = tl.load(p_dk_aux, mask=mask_bk, other=0).to(tl.float32)
 
     for i in range(T - 1, -1, -1):
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
@@ -322,8 +323,11 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _dkv = _q[:, None] * _do[None, :]
         d_hz = d_h * _z
-        d_kaux = tl.sum(d_hz * _v[None, :], axis=1) * _k
-        tl.store(p_dk_aux, d_kaux.to(p_dk_aux.dtype.element_ty), mask=mask_bk)
+        if i < T - 1:
+            dki = tl.load(p_dk_aux, mask=mask_bk, other=0).to(tl.float32)
+            d_kaux = dki_prev + dki - tl.sum(d_hz * _v[None, :], axis=1) * _k
+            tl.store(p_dk_aux, d_kaux.to(p_dk_aux.dtype.element_ty), mask=mask_bk)
+            dki_prev = d_kaux
 
         _dkvu = d_hz + _dkv * _u
         d_k = tl.sum(_dkvu * _v[None, :], axis=1)
@@ -431,7 +435,8 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             REVERSE=ctx.reverse,
         )
         dq = dq.sum(0).to(q)
-        dq_aux = dq_aux.sum(0).to(w)
+        # dq_aux = dq_aux.sum(0).to(w)
+        dq_aux = F.pad(dq_aux, (0, 0, -1, 1))
 
         BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), 32)
         NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
@@ -439,8 +444,9 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         num_warps = 1
         dk = q.new_empty(NV, batch_size, n_heads, seq_len,
                          d_head_qk, dtype=torch.float32)
-        dk_aux = q.new_empty(NV, batch_size, n_heads, seq_len,
-                             d_head_qk, dtype=torch.float32)
+        # dk_aux = q.new_empty(NV, batch_size, n_heads, seq_len,
+        #                      d_head_qk, dtype=torch.float32)
+        dk_aux = dq_aux
         dv = q.new_empty(NK, batch_size, n_heads, seq_len,
                          d_head_v, dtype=torch.float32)
         dz = z.new_zeros(NK, NV, batch_size, n_heads, d_head_qk, d_head_v, dtype=torch.float32)
@@ -463,16 +469,15 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         dk_aux = dk_aux.sum(0).to(w)
         dz = dz.sum((0, 1, 2)).to(z)
 
-        # dw = F.pad(dq_aux, (0, 0, -1, 1)) - dk_aux
-
+        dw = dk_aux
         # FIXME: old version
-        dw = dq_aux[:, :, 1:] - dk_aux[:, :, 0:-1]
-        dw = torch.nn.functional.pad(dw, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
-        dw = chunk_reversed_cumsum_fwd(dw).to(w)
+        # dw = dq_aux[:, :, 1:] - dk_aux[:, :, 0:-1]
+        # dw = torch.nn.functional.pad(dw, (0, 0, 0, 1, 0, 0, 0, 0), value=0)
+        # dw = chunk_reversed_cumsum_fwd(dw).to(w)
         if initial_state is None:
             dw[:, :, 0] = 0.
 
-        du = torch.einsum('bhnv,bhnk,bhnk->hkv', do * v, q*scale * k)
+        du = torch.einsum('bhnv,bhnv,bhnk,bhnk->hkv', do, v, q*scale, k)
         # du = ((do*dv)[:, :, :, None] * (k * q * scale)[..., None]).sum((0, 2)).to(u)
 
         # TODO: get gradient expression for dz
