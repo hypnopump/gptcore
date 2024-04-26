@@ -307,24 +307,30 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         #     kv_state = kv_state.contiguous().to(torch.bfloat16)
 
         eps = 1e-5
+        tau = th.e
         if self.wmat:
             w = time_decay.view(1, H, 1, K, V)
             w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2)  # BHTK()
             # w = -torch.exp(w) # log(exp(-exp))
-            w = (-w.exp()).exp()
+            # w = (-w.exp()).exp()
+            w = -th.exp(- F.elu(-w+tau)+tau)
             # w = w[..., [0]].repeat(1, 1, 1, 1, V)
-            w = (eps + (1-eps) * w).log()  # (B, H, T, K, V)
+            # w = (eps + (1-eps) * w).log()  # (B, H, T, K, V)
         else:
             w = time_decay.view(1, H, 1, K)
             if self.k_one_minus_w:
                 w = w+k
-                w = (-w.exp()).exp()
-                k = 1-w
+                w = -th.exp(- F.elu(-w+tau)+tau)
+                # w = (-w.exp()).exp()
+                k = 1-w.exp()
             else:
                 w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
-                w = (-w.exp()).exp()
+                w = -th.exp(- F.elu(-w + tau) + tau)
+                # w = (-w.exp()).exp()
+                k = 1 - w.exp()
+
             # w = -torch.exp(w) # log(exp(-exp))
-            w = (eps + (1 - eps) * w).log()  # (B, H, T, K)
+            # w = (eps + (1 - eps) * w).log()  # (B, H, T, K)
 
         if self.umat:
             u = time_first.view(H,K,V)
@@ -345,6 +351,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         else:
             # torch + th.compile = 200 ktok/s || torch+fcompile = 80 ktok/s || torch = 70 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
             # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
+            # w = th.exp(w)
             # u = time_first.view(1,H,1,K)
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
 
