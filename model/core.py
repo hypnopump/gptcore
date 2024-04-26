@@ -319,6 +319,23 @@ class ResidualMixOp(TransformerLayerPart, IResidualOp):
     def forward(self, x : Tensor, sublayer, layer_recurrent_memory : Optional[Tensor] = None):
         return x * self.residual_mix + self.dropout(sublayer(self.norm(x))) * (2 - self.residual_mix)
 
+class ParallelResidualMixOp(TransformerLayerPart, IResidualOp):
+    def __init__(self, sublayer_norm_factory : Callable[..., nn.Module] = Factory(norm.RMSNorm, weight_scaling = False)):
+        super().__init__()
+        hparams = self.hparams
+        self.dropout = nn.Dropout(hparams.dropout)
+        self.norm = sublayer_norm_factory(hparams.d_model)
+        self.residual_mix1 = nn.Parameter(torch.ones(1,1,hparams.d_model))
+        self.residual_mix2 = nn.Parameter(torch.ones(1, 1, hparams.d_model))
+
+    def forward(self, x : Tensor, token_mix, channel_mix) -> Tensor:
+        base = (1.5 - self.residual_mix1) + (1.5 - self.residual_mix2)
+        return (
+            x * base +
+            self.dropout(token_mix(self.norm(x))) * self.residual_mix1 +
+            self.dropout(channel_mix(self.norm(x))) * self.residual_mix2
+        )
+
 class TransformerLayer(TransformerLayerPart):
     def __init__(self,  
                  self_attention_sublayer_factory : Callable[..., model.interface.IAttentionSubLayer] = Factory(AttentionSubLayer),
@@ -350,6 +367,37 @@ class TransformerLayer(TransformerLayerPart):
         # feedforward network
         feedforward = lambda y: self.feedforward_sublayer(y)
         x = self.feedforward_resop(x, feedforward)
+
+        return x
+
+
+class ParallelTransformerLayer(TransformerLayerPart):
+    def __init__(self,
+                 self_attention_sublayer_factory : Callable[..., model.interface.IAttentionSubLayer] = Factory(AttentionSubLayer),
+                 cross_attention_sublayer_factory : Callable[..., model.interface.IAttentionSubLayer | nn.Identity] = Factory(nn.Identity),
+                 feedforward_sublayer_factory : Callable[..., model.interface.IFeedForwardSubLayer] = Factory(RWKVFeedForwardSubLayer),
+                 residual_op_factory : Callable[..., IResidualOp] = Factory(ParallelResidualMixOp, sublayer_norm_factory = Factory(norm.RMSNorm, weight_scaling = False)),
+                 ):
+        super().__init__()
+        self.self_attention_sublayer = self_attention_sublayer_factory()
+        self.self_attention_resop = residual_op_factory()
+
+        self.cross_attention_sublayer = cross_attention_sublayer_factory()
+        self.cross_attention_resop = residual_op_factory()
+
+        self.feedforward_sublayer = feedforward_sublayer_factory()
+
+    def forward(self, x : Tensor, encoder_output : Tensor | None = None, layer_recurrent_memory : Optional[Tensor] = None):
+        # self attention (query, key, and value are all based on the same inputs)
+        self_attn = lambda y: self.self_attention_sublayer(y, y, y, layer_recurrent_memory)
+        feedforward = lambda y: self.feedforward_sublayer(y)
+        x = self.self_attention_resop(x, self_attn, feedforward) # this code looks a little complicated, but it's just allowing us to swap out whether we add or mix the residual
+
+        # optional cross attention (query is based on the current input, but key and value are based on the encoder's output)
+        # NOTE - we check against nn.Identity because the normal nn.Identity module does not allow extra arguments passed, though our interface.Identity version does
+        if encoder_output is not None and not isinstance(self.cross_attention_sublayer, nn.Identity):
+            cross_attn = lambda y: self.cross_attention_sublayer(y, encoder_output, encoder_output, layer_recurrent_memory)
+            x = self.cross_attention_resop(x, cross_attn)
 
         return x
 

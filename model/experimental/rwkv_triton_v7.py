@@ -412,7 +412,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
         # FIXME: beware we have indexing problems and
         # FIXME: this numbers determine the max head size we can take
-        BB_BK_DQ = 16*4
+        BB_BK_DQ = 16
         BB_BV_DQ = 64
         BB_BK_DKV = 32*2
         BB_BV_DKV = 32*2

@@ -45,23 +45,27 @@ cli.Config(
 
             n_kv_head_ratio=1,
         ),
-        layer_factory=lambda: model.core.TransformerLayer(
-            self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
-            # feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
-            feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
-            # feedforward_sublayer_factory = lambda: model.experimental.rwkv6_0.HypnoFeedForwardSubLayer(),
-            # underperform
-            # residual_op_factory=lambda: model.core.ResidualAddOp(),
-            # residual_op_factory=lambda: model.core.ResidualPartialMixOp(),
-            # FIXME: test whether it outperforms. so far (300M it does)
-            # residual_op_factory=lambda: model.core.ResidualPhiMixOp(),
-        ),
-        # layer_factory=lambda: model.core.GradientCheckpointing(
-        #     module_factory=lambda: model.core.TransformerLayer(
-        #         self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
-        #         feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
-        #     ),
+        # layer_factory=lambda: model.core.TransformerLayer(
+        #     self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
+        #     # feedforward_sublayer_factory = lambda: model.core.RWKVFeedForwardSubLayer(),
+        #     feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+        #     # feedforward_sublayer_factory = lambda: model.experimental.rwkv6_0.HypnoFeedForwardSubLayer(),
+        #     # underperform
+        #     # residual_op_factory=lambda: model.core.ResidualAddOp(),
+        #     # residual_op_factory=lambda: model.core.ResidualPartialMixOp(),
+        #     # FIXME: test whether it outperforms. so far (300M it does)
+        #     # residual_op_factory=lambda: model.core.ResidualPhiMixOp(),
         # ),
+        # layer_factory=lambda: model.core.GradientCheckpointing(
+        #    module_factory=lambda: model.core.TransformerLayer(
+        #        self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
+        #        feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+        #    ),
+        # ),
+        layer_factory=lambda: model.core.ParallelTransformerLayer(
+            self_attention_sublayer_factory = lambda: model.experimental.rwkv6_0.RWKV6_0_AttentionSubLayer(),
+            feedforward_sublayer_factory = lambda: model.rwkv.RWKV_ChannelMixSubLayer(),
+        ),
     ),
 
     trainer_factory = lambda: lit.CoreLightningTrainer(

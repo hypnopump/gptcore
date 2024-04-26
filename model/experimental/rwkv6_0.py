@@ -155,9 +155,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = True   # True
+        self.umat = False   # True
         self.zmat = False  # True
-        self.wmat = True   # True
+        self.wmat = False   # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -349,8 +349,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
 
             u = time_first.view(H, K)
-            out, s = fused_recurrent_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-            # out, s = chunk_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
+            # out, s = fused_recurrent_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+            out, s = chunk_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
 
 
         out = out.transpose(1,2).reshape(B*T, H*V)
