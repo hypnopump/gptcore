@@ -322,12 +322,11 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                 w = w+k
                 w = -th.exp(- F.elu(-w+tau)+tau)
                 # w = (-w.exp()).exp()
-                k = 1-w.exp()
+                k = (1-w.exp()).to(r)
             else:
                 w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
                 w = -th.exp(- F.elu(-w + tau) + tau)
                 # w = (-w.exp()).exp()
-                k = 1 - w.exp()
 
             # w = -torch.exp(w) # log(exp(-exp))
             # w = (eps + (1 - eps) * w).log()  # (B, H, T, K)
@@ -361,7 +360,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
 
         out = out.transpose(1,2).reshape(B*T, H*V)
-        out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V) - self.ln_x.bias
+        out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V) # - self.ln_x.bias
         # out = self.ln_x(out).view(B, T, H * V) - self.ln_x.bias
         # g=1.
         # out = out.transpose(1, 2).reshape(B*T, H*V)
