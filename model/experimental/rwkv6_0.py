@@ -222,7 +222,14 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             self.time_filter = nn.Parameter(1 + 1e-5 * torch.randn(self.n_kv_head, self.k_head_size, self.v_head_size))
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-        self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
+        # self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
+        # headwise r:
+        with torch.no_grad():
+            mats = []
+            receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
+            for i in range(self.n_head):
+                mats.append(receptance.weight.T[i*self.r_head_size:(i+1)*self.r_head_size, i*self.r_head_size:(i+1)*self.r_head_size].clone())
+        self.receptance = nn.Parameter(torch.stack(mats, dim=0)) # (H, K, K)
         self.key = nn.Linear(args.n_embd, self.n_kv_head * self.k_head_size, bias=False)
         self.value = nn.Linear(args.n_embd, self.n_kv_head * self.v_head_size, bias=False)
         self.output = nn.Linear(args.dim_v, args.n_embd, bias=False)
@@ -280,10 +287,12 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         rx = xx + sx * (self.r_maa + mr)
         gx = xx + sx * (self.g_maa + mg)
 
-        r = self.receptance(rx).view(B, T, H, K).transpose(1, 2) # BHTK
+        # r = self.receptance(rx).view(B, T, H, K).transpose(1, 2)  # BHTK
+        r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
         k = self.key(kx).view(B, T, KVH, K).transpose(1, 2)      # BHTK
         v = self.value(vx).view(B, T, KVH, V).transpose(1, 2)    # BHTV
         g = F.silu(self.gate(gx))
+
 
         r, k = self.rotary_positional_embedding((r, k))
 
