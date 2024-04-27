@@ -360,7 +360,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
 
         out = out.transpose(1,2).reshape(B*T, H*V)
-        out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V) # - self.ln_x.bias
+        out = self.ln_x(out / self.args.head_size_divisor).view(B, T, H*V)  # - self.ln_x.bias
         # out = self.ln_x(out).view(B, T, H * V) - self.ln_x.bias
         # g=1.
         # out = out.transpose(1, 2).reshape(B*T, H*V)
