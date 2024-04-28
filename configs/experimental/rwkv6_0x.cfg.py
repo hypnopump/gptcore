@@ -21,7 +21,7 @@ MAX_SEQUENCE_LENGTH = 1024
 
 
 LOG_PROJECT = 'gptcore_pls'
-LOG_NAME = 'RWKV6.0xFLA_chunk UWmat(kvsum,wdim2x) gateLNnoaffineWclamp L8D512H8CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_chunk gateLNnoaffineWclamp headwiseRKW L8D512H8CM3Adam'
 
 cli.Config(
     seed_everything = 1337,
@@ -84,7 +84,7 @@ cli.Config(
             log_every_n_steps=20,
             logger = [
                 # lightning.pytorch.loggers.CSVLogger(save_dir="."),
-                lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
+                # lightning.pytorch.loggers.WandbLogger(project=LOG_PROJECT, name=LOG_NAME),
             ],
             #devices=1,
             #strategy='ddp',
