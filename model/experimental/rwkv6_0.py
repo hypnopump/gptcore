@@ -155,10 +155,10 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = False   # True
-        self.zmat = False  # True
+        self.umat = True   # True
+        self.zmat = True  # True
         self.wmat = False   # True
-        self.k_one_minus_w = False
+        self.k_one_minus_w = True
 
         self.args = args
         self.layer_id = layer_id
@@ -232,20 +232,20 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         # self.receptance = nn.Parameter(torch.stack(mats, dim=0)) # (H, K, K)
 
         # single head, headwise rkw:
-        receptance, key, decay = [], [], []
-        with torch.no_grad():
-            receptance.append(nn.Linear(self.r_head_size, self.r_head_size, bias=False).weight.T)
-            key.append(nn.Linear(self.k_head_size, self.k_head_size, bias=False).weight.T)
-            decay.append(nn.Linear(self.k_head_size, self.k_head_size, bias=False).weight.T)
+        # receptance, key, decay = [], [], []
+        # with torch.no_grad():
+        #     # receptance.append(nn.Linear(self.r_head_size, self.r_head_size, bias=False).weight.T)
+        #     # key.append(nn.Linear(self.k_head_size, self.k_head_size, bias=False).weight.T)
+        #     decay.append(nn.Linear(self.k_head_size, self.k_head_size, bias=False).weight.T)
 
-        self.receptance = nn.Parameter(torch.stack(receptance, dim=0))  # (H, K, K)
-        self.key = nn.Parameter(torch.stack(key, dim=0))  # (H, K, K)
-        self.decay = nn.Parameter(torch.stack(decay, dim=0))  # (H, K, K)
+        # self.receptance = nn.Parameter(torch.stack(receptance, dim=0))  # (H, K, K)
+        # self.key = nn.Parameter(torch.stack(key, dim=0))  # (H, K, K)
+        # self.decay = nn.Parameter(torch.stack(decay, dim=0))  # (H, K, K)
 
 
         # classic
-        # self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
-        # self.key = nn.Linear(args.n_embd, self.n_kv_head * self.k_head_size, bias=False)
+        self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
+        self.key = nn.Linear(args.n_embd, self.n_kv_head * self.k_head_size, bias=False)
         self.value = nn.Linear(args.n_embd, self.n_kv_head * self.v_head_size, bias=False)
         self.output = nn.Linear(args.dim_v, args.n_embd, bias=False)
         self.gate = nn.Linear(args.n_embd, args.dim_v, bias=False)
@@ -302,15 +302,15 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         rx = xx + sx * (self.r_maa + mr)
         gx = xx + sx * (self.g_maa + mg)
 
-        # r = self.receptance(rx).view(B, T, H, K).transpose(1, 2)  # BHTK
-        # k = self.key(kx).view(B, T, KVH, K).transpose(1, 2)      # BHTK
+        r = self.receptance(rx).view(B, T, H, K).transpose(1, 2)  # BHTK
+        k = self.key(kx).view(B, T, KVH, K).transpose(1, 2)      # BHTK
         v = self.value(vx).view(B, T, KVH, V).transpose(1, 2)  # BHTV
         g = F.silu(self.gate(gx))
 
         # headwise, multi-head R
-        r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
-        k = th.einsum('bthk,hkd->bhtd', kx.view(B, T, H, K), self.key)  # BHTK
-        wk = th.einsum('bthk,hkd->bhtd', wx.view(B, T, H, K), self.decay)  # BHTK
+        # r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
+        # k = th.einsum('bthk,hkd->bhtd', kx.view(B, T, H, K), self.key)  # BHTK
+        # wk = th.einsum('bthk,hkd->bhtd', wx.view(B, T, H, K), self.decay)  # BHTK
 
         # headwise, single-head (weights-wise)
         # r = self.receptance(rx.view(B, T, H, K).transpose(1, 2))  # BHTK
@@ -360,8 +360,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
                 # w = (-w.exp()).exp()
                 k = (1-w.exp()).to(r)
             else:
-                # w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
-                w = w + wk
+                w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
+                # w = w + k
                 w = -th.exp(- F.elu(-w + tau) + tau)
                 # w = (-w.exp()).exp()
 
