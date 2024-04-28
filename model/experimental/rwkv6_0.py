@@ -309,8 +309,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         # headwise, multi-head R
         r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
-        k = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.key)  # BHTK
-        wk = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.decay)  # BHTK
+        k = th.einsum('bthk,hkd->bhtd', kx.view(B, T, H, K), self.key)  # BHTK
+        wk = th.einsum('bthk,hkd->bhtd', wx.view(B, T, H, K), self.decay)  # BHTK
 
         # headwise, single-head (weights-wise)
         # r = self.receptance(rx.view(B, T, H, K).transpose(1, 2))  # BHTK
