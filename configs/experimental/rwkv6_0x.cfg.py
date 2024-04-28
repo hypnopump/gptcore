@@ -21,7 +21,7 @@ MAX_SEQUENCE_LENGTH = 1024
 
 
 LOG_PROJECT = 'gptcore_pls'
-LOG_NAME = 'RWKV6.0xFLA_chunk gateLNnoaffineWclampRheadwise L8D512H8CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_chunk UWmat(kvsum,wdim2x) gateLNnoaffineWclamp L8D512H8CM3Adam'
 
 
 cli.Config(

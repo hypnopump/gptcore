@@ -155,9 +155,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = False   # True
+        self.umat = True   # True
         self.zmat = False  # True
-        self.wmat = False   # True
+        self.wmat = True   # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -190,9 +190,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             TIME_MIX_EXTRA_DIM = 32
             self.tm_w1 = nn.Parameter(torch.empty(args.n_embd, TIME_MIX_EXTRA_DIM * 5).uniform_(-0.01, 0.01))
             self.tm_w2 = nn.Parameter(torch.zeros(5, TIME_MIX_EXTRA_DIM, args.n_embd))
-            W_MIX_EXTRA_DIM = 64
+            W_MIX_EXTRA_DIM = 64*2
             self.td_w1 = nn.Parameter(torch.empty(args.n_embd, W_MIX_EXTRA_DIM).uniform_(-0.01, 0.01))
-            self.td_w2 = nn.Parameter(torch.zeros(W_MIX_EXTRA_DIM, args.n_embd))
+            self.td_w2 = nn.Parameter(torch.zeros(W_MIX_EXTRA_DIM, args.n_embd*2))
 
             # fancy time_decay
             k_dim_att = args.n_kv_head * self.k_head_size
@@ -222,14 +222,14 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             self.time_filter = nn.Parameter(1 + 1e-5 * torch.randn(self.n_kv_head, self.k_head_size, self.v_head_size))
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-        # self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
+        self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
         # headwise r:
-        with torch.no_grad():
-            mats = []
-            receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
-            for i in range(self.n_head):
-                mats.append(receptance.weight.T[i*self.r_head_size:(i+1)*self.r_head_size, i*self.r_head_size:(i+1)*self.r_head_size].clone())
-        self.receptance = nn.Parameter(torch.stack(mats, dim=0)) # (H, K, K)
+        # with torch.no_grad():
+        #     mats = []
+        #     receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
+        #     for i in range(self.n_head):
+        #         mats.append(receptance.weight.T[i*self.r_head_size:(i+1)*self.r_head_size, i*self.r_head_size:(i+1)*self.r_head_size].clone())
+        # self.receptance = nn.Parameter(torch.stack(mats, dim=0)) # (H, K, K)
         self.key = nn.Linear(args.n_embd, self.n_kv_head * self.k_head_size, bias=False)
         self.value = nn.Linear(args.n_embd, self.n_kv_head * self.v_head_size, bias=False)
         self.output = nn.Linear(args.dim_v, args.n_embd, bias=False)
@@ -287,8 +287,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         rx = xx + sx * (self.r_maa + mr)
         gx = xx + sx * (self.g_maa + mg)
 
-        # r = self.receptance(rx).view(B, T, H, K).transpose(1, 2)  # BHTK
-        r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
+        r = self.receptance(rx).view(B, T, H, K).transpose(1, 2)  # BHTK
+        # r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
         k = self.key(kx).view(B, T, KVH, K).transpose(1, 2)      # BHTK
         v = self.value(vx).view(B, T, KVH, V).transpose(1, 2)    # BHTV
         g = F.silu(self.gate(gx))
@@ -319,7 +319,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         tau = th.e
         if self.wmat:
             w = time_decay.view(1, H, 1, K, V)
-            w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K, 1).transpose(1, 2)  # BHTK()
+            loraw = (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, 2*K).transpose(1, 2) # BHTK()
+            lorak, lorav = loraw.chunk(2, dim=-1)
+            w = w + lorak[..., None] + lorav[..., None, :]
             # w = -torch.exp(w) # log(exp(-exp))
             # w = (-w.exp()).exp()
             w = -th.exp(- F.elu(-w+tau)+tau)
