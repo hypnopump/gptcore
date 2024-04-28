@@ -232,9 +232,16 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         # self.receptance = nn.Parameter(torch.stack(mats, dim=0)) # (H, K, K)
 
         # single head, headwise rkw:
-        self.receptance = nn.Linear(self.r_head_size, self.r_head_size, bias=False)
-        self.key = nn.Linear(self.k_head_size, self.k_head_size, bias=False)
-        self.decay = nn.Linear(self.k_head_size, self.k_head_size, bias=False)
+        receptance, key, decay = [], [], []
+        with torch.no_grad():
+            receptance.append(nn.Linear(self.r_head_size, self.r_head_size, bias=False).weight.T)
+            key.append(nn.Linear(self.k_head_size, self.k_head_size, bias=False).weight.T)
+            decay.append(nn.Linear(self.k_head_size, self.k_head_size, bias=False).weight.T)
+
+        self.receptance = nn.Parameter(torch.stack(receptance, dim=0))  # (H, K, K)
+        self.key = nn.Parameter(torch.stack(key, dim=0))  # (H, K, K)
+        self.decay = nn.Parameter(torch.stack(decay, dim=0))  # (H, K, K)
+
 
         # classic
         # self.receptance = nn.Linear(args.n_embd, self.n_head * self.r_head_size, bias=False)
@@ -301,11 +308,14 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         g = F.silu(self.gate(gx))
 
         # headwise, multi-head R
-        # r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
+        r = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.receptance)  # BHTK
+        k = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.key)  # BHTK
+        wk = th.einsum('bthk,hkd->bhtd', rx.view(B, T, H, K), self.decay)  # BHTK
+
         # headwise, single-head (weights-wise)
-        r = self.receptance(rx.view(B, T, H, K).transpose(1, 2))  # BHTK
-        k = self.key(kx.view(B, T, KVH, K).transpose(1, 2))      # BHTK
-        wk = self.decay(wx.view(B, T, KVH, K, V).transpose(1, 2))  # BHTKV
+        # r = self.receptance(rx.view(B, T, H, K).transpose(1, 2))  # BHTK
+        # k = self.key(kx.view(B, T, H, K).transpose(1, 2))      # BHTK
+        # wk = self.decay(wx.view(B, T, H, K).transpose(1, 2))  # BHTKV
 
 
 
@@ -345,13 +355,13 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         else:
             w = time_decay.view(1, H, 1, K)
             if self.k_one_minus_w:
-                # w = w+k
-                w = w + wk
+                w = w+k
                 w = -th.exp(- F.elu(-w+tau)+tau)
                 # w = (-w.exp()).exp()
-                # k = (1-w.exp()).to(r)
+                k = (1-w.exp()).to(r)
             else:
-                w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
+                # w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
+                w = w + wk
                 w = -th.exp(- F.elu(-w + tau) + tau)
                 # w = (-w.exp()).exp()
 
