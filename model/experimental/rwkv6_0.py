@@ -115,6 +115,31 @@ def rwkv7_recurrent(r_in, k_in, v_in, w_in, u, kv_state = 0.):
     out = torch.cat(out, dim=-2).to(dtype)
     return out, None
 
+
+def rwkv6_delta_recurrent(r_in, k_in, v_in, w_in, u, kv_state, betas):
+    """ Weights the whole state by W, not just the new term.
+    r_in: (B,H,L,K)
+    k_in: (B,H,L,K)
+    v_in: (B,H,L,V)
+    w_in: (B,H,L,K)
+    u: (H,K)
+    kv_state: (H,K,V)
+    betas: (B,H,L,K)
+    """
+    B,H,L,K = r_in.shape
+    V = v_in.size(-1)
+    L = r_in.size(-2)
+    out = []
+    for t in range(L):
+        r, k, v, w, beta = r_in[...,t:t+1,:], k_in[...,t:t+1,:], v_in[...,t:t+1,:], w_in[...,t:t+1,:], betas[..., t:t+1, :]
+        kv = k.mT @ v # KV
+        kk = k.mT @ F.normalize(k) @ kv_state
+        out.append( r @ (kv_state + u.mT * kv) )  # 1K @ KV -> 1V
+        kv_state = w.mT * kv_state + beta*kv + (1-beta) * kk  # KV
+    out = torch.cat(out, dim=-2)
+    return out, kv_state
+
+
 def sanity_check():
     torch.manual_seed(1337)
     
