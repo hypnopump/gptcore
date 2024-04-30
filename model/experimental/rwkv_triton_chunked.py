@@ -849,7 +849,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
         # # du = ((do * v).sum(-1)[..., None] * k * q * scale).sum(-2).to(u)
         # # dq += ((do * v).sum(-1)[..., None] * k * scale * u[:, :, None, :])
         # # dk += ((do * v).sum(-1)[..., None] * q * scale * u[:, :, None, :])
-        BT = 1 # 64
+        BT = 1
         grid = (triton.cdiv(T, BT), B * H)
         du = torch.empty_like(g, dtype=torch.float)
         post_process_grad[grid](

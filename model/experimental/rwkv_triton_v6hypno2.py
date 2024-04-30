@@ -234,7 +234,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         p_dq += -DK if REVERSE else DK
         p_dq_aux += -DK if REVERSE else DK
 
-
 @triton.jit
 def fused_recurrent_rwkv6_bwd_kernel_dkv(
         # B: batch_size, H: n_heads, T: seq_len, D: d_head
@@ -433,17 +432,16 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         # dq_aux = dq_aux.sum(0).to(w)
         dq_aux = F.pad(dq_aux, (0, 0, -1, 1))
 
-        # FIXME: hypnopump@ use same grid to avoid stride problems in reused DQ/DK
         # BK, BV = min(triton.next_power_of_2(d_head_qk), 32), min(triton.next_power_of_2(d_head_v), 32)
         # NK, NV = triton.cdiv(d_head_qk, BK), triton.cdiv(d_head_v, BV)
         num_stages = 1
         num_warps = 1
-        dk = q.new_empty(NV, batch_size, n_heads, seq_len,
+        dk = q.new_zeros(NV, batch_size, n_heads, seq_len,
                          d_head_qk, dtype=torch.float32)
         # dk_aux = q.new_empty(NV, batch_size, n_heads, seq_len,
         #                      d_head_qk, dtype=torch.float32)
         dk_aux = dq_aux
-        dv = q.new_empty(NK, batch_size, n_heads, seq_len,
+        dv = q.new_zeros(NK, batch_size, n_heads, seq_len,
                          d_head_v, dtype=torch.float32)
         dz = z.new_zeros(NK, NV, batch_size, n_heads, d_head_qk, d_head_v, dtype=torch.float32)
 

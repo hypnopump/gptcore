@@ -57,11 +57,11 @@ fused_recurrent_rwkv7hypno_compiled = torch._dynamo.disable(torch.jit.ignore(fus
 fused_recurrent_rwkv7hypno2_compiled = torch._dynamo.disable(torch.jit.ignore(fused_recurrent_rwkv7hypno2))
 
 
-TAU = 9
+TAU = th.e
 
 @th.compile
 def safe_wclamp(x: th.Tensor) -> th.Tensor:
-    return th.exp(-th.exp(- F.elu(-x + TAU) + TAU))
+    return -th.exp(- F.elu(-x + TAU) + TAU)
 
 
 # version without u 'bonus' term
@@ -194,9 +194,9 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = False   # True
+        self.umat = True   # True
         self.zmat = False  # True
-        self.wmat = False   # True
+        self.wmat = True   # True
         self.k_one_minus_w = True
 
         self.args = args
@@ -231,7 +231,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             self.tm_w2 = nn.Parameter(torch.zeros(5, TIME_MIX_EXTRA_DIM, args.n_embd))
             W_MIX_EXTRA_DIM = 64*2
             self.td_w1 = nn.Parameter(torch.empty(args.n_embd, W_MIX_EXTRA_DIM).uniform_(-0.01, 0.01))
-            self.td_w2 = nn.Parameter(torch.zeros(W_MIX_EXTRA_DIM, args.n_embd))
+            self.td_w2 = nn.Parameter(torch.zeros(W_MIX_EXTRA_DIM, args.n_embd * 2))
 
             # fancy time_decay
             k_dim_att = args.n_kv_head * self.k_head_size
@@ -383,19 +383,21 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             w = time_decay.view(1, H, 1, K, V)
             loraw = (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, 2*K).transpose(1, 2) # BHTK()
             lorak, lorav = loraw.chunk(2, dim=-1)
-            w = w + lorak[..., None] + lorav[..., None, :]
-            # w = -torch.exp(w) # log(exp(-exp))
-            # w = (-w.exp()).exp()
-            w = safe_wclamp(w)  # w = -th.exp(- F.elu(-w+tau)+tau)
-            # w = w[..., [0]].repeat(1, 1, 1, 1, V)
-            # w = (eps + (1-eps) * w).log()  # (B, H, T, K, V)
+            w = w + lorav[..., None, :]
+            if self.k_one_minus_w:
+                w = w + k[..., None]
+                w = safe_wclamp(w)
+                k = (1 - w.diagonal(dim1=-2, dim2=-1).exp()).to(r)
+            else:
+                w = w + lorak[..., None]
+                w = safe_wclamp(w)
         else:
             w = time_decay.view(1, H, 1, K)
             if self.k_one_minus_w:
                 w = w+k
                 w = safe_wclamp(w)  # w = -th.exp(- F.elu(-w+tau)+tau)
                 # w = (-w.exp()).exp()
-                k = (1 - w).to(r)
+                k = (1 - w.exp()).to(r)
             else:
                 w = w + (torch.tanh(wx @ self.td_w1) @ self.td_w2).view(B, T, H, K).transpose(1, 2)  # BHTK
                 # w = w + k
@@ -410,40 +412,34 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             if self.zmat:
                 time_filter = self.time_filter.float()  # (KVH,K,V)
                 z = time_filter.view(H, K, V)
-                # z = z * (2 - u)
 
             if self.wmat:
                 if self.zmat:
-                    out, s = fused_recurrent_rwkv7hypno2_compiled(r, k, v, w, u, z, initial_state=kv_state, scale=1.0)
+                    # sloow: 15 ktok/s
+                    out, s = fused_recurrent_rwkv7hypno2_compiled(r, k, v, w.exp(), u, z, initial_state=kv_state, scale=1.0)
                 else:
-                    out, s = fused_recurrent_rwkv7hypno_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+                    # sloow: 15 ktok/s
+                    out, s = fused_recurrent_rwkv7hypno_compiled(r, k, v, w.exp(), u, initial_state=kv_state, scale=1.0)
                     # 10x slower, 3x vram:
                     # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
                     # out, s = rwkv7_recurrent(r, k, v, w, u, kv_state)
             else:
                 if self.zmat:
-                    u = th.sigmoid(u)
-                    z = (1 - u.square() + 1e-6).sqrt()
-                    out, s = fused_recurrent_rwkv6hypno2_compiled(r, k, v, w, u, z, initial_state=kv_state, scale=1.0)
+                    out, s = fused_recurrent_rwkv6hypno2_compiled(r, k, v, w.exp(), u, z, initial_state=kv_state, scale=1.0)
                 else:
-                    # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 40 ktok/s || chunked = ???
-                    eps = 3e-4
-                    w = (eps + (1 - eps) * w).log().to(r)
-                    # out, s = fused_recurrent_rwkv6hypno_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0)
+                    # torch + compile = 115 ktok/s || torch+fcompile = 73 ktok/s || torch = 45 ktok/s || recurrent = 45 ktok/s || chunked = 62 ktok/s
+                    # out, s = fused_recurrent_rwkv6hypno_compiled(r, k, v, w.exp(), u, initial_state=kv_state, scale=1.0)
                     out, s = chunk_rwkv6hypno_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
                     # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
                     # out, s = rwkv_inner_umat(r, k, v, w, u, kv_state, chunk_len)
         else:
             # torch + th.compile = 200 ktok/s || torch+fcompile = 80 ktok/s || torch = 70 ktok/s || recurrent = 50 ktok/s || chunked = 100 ktok/s
             # kv_state = torch.zeros(B, H, K, V, device=r.device, dtype=r.dtype)
-            # w = th.exp(w)
             # u = time_first.view(1,H,1,K)
             # out, s = rwkv_inner(r, k, v, w, u, kv_state, chunk_len)
 
             u = time_first.view(H, K)
             # out, s = fused_recurrent_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0)
-            eps = 3e-4
-            w = (eps + (1 - eps) * w).log().to(r)
             out, s = chunk_rwkv6_compiled(r, k, v, w, u, initial_state=kv_state, scale=1.0, checkpoint_level=0)
 
 

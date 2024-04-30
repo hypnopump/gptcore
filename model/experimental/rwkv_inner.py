@@ -40,10 +40,11 @@ def rwkv_inner(r,k,v,w,u,kv_state,chunk_len:int=24,precision_dtype:torch.dtype=t
             precision_min_val = 0.005 # good for fp32 (1.175e-38 ^ (1/16.0) < 0.00426)
         else: #elif precision_dtype == torch.float64:
             precision_min_val = 1e-10 # good for fp64 (1.7e-308 ^ (1/16.0) < 5.8e-20)
-        w = w.clamp(precision_min_val)
+        # w = w.clamp(precision_min_val)
 
         # calculate cumulative decay in log space where it won't overflow
-        w_log = w.float().log() # (1,H,L,K) or (B,H,L,K)
+        # w_log = w.float().log() # (1,H,L,K) or (B,H,L,K)
+        w_log = w
 
         # chunked view of w_log
         wc_log = w_log.view(w.size(0),H,N,T,K)
@@ -147,10 +148,11 @@ def rwkv_inner_umat(r,k,v,w,u,kv_state,chunk_len:int=24,precision_dtype:torch.dt
             precision_min_val = 0.005 # good for fp32 (1.175e-38 ^ (1/16.0) < 0.00426)
         else: #elif precision_dtype == torch.float64:
             precision_min_val = 1e-10 # good for fp64 (1.7e-308 ^ (1/16.0) < 5.8e-20)
-        w = w.clamp(precision_min_val)
+        # w = w.clamp(precision_min_val)
 
         # calculate cumulative decay in log space where it won't overflow
-        w_log = w.float().log() # (1,H,L,K) or (B,H,L,K)
+        # w_log = w.float().log() # (1,H,L,K) or (B,H,L,K)
+        w_log = w
 
         # chunked view of w_log
         wc_log = w_log.view(w.size(0),H,N,T,K)
