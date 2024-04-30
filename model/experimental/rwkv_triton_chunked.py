@@ -112,6 +112,73 @@ def post_process_grad(
 
 
 @triton.jit
+def post_process_grad_umat(
+    q,
+    k,
+    v,
+    u,
+    do,
+    dk,
+    dq,
+    scale,
+    s_k_h,
+    s_k_t,
+    s_k_d,
+    s_v_h,
+    s_v_t,
+    s_v_d,
+    H,
+    T: tl.constexpr,
+    BT: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_h = i_bh % H
+
+    # Note that BK = tl.next_power_of_2(K), BV = tl.next_power_of_2(V)
+    p_q = tl.make_block_ptr(q + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_dq = tl.make_block_ptr(dq + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i_t * BT, 0), (BT, BV), (1, 0))
+
+    p_do = tl.make_block_ptr(do + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i_t * BT, 0), (BT, BV), (1, 0))
+    # u vector
+    # p_u = tl.make_block_ptr(u + i_h * K, (K,), (1,), (0,), (BK,), (0,))
+    # Parameters:
+    # base – The base pointer to the parent tensor
+    # shape – The shape of the parent tensor
+    # strides – The strides of the parent tensor
+    # offsets – The offsets to the block
+    # block_shape – The shape of the block
+    # order – The order of the original data format
+    p_u = tl.make_block_ptr(u + i_h * K * V, (K, V), (K, 1), (0, 0), (BK, BV), (1, 0))
+
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_u = tl.load(p_u, boundary_check=(0,))
+
+    # b_vdo = tl.sum(b_v * b_do, axis=1)
+    # b_du = b_vdo[:, None] * b_k * b_q * scale
+    b_vdo = (scale * b_v * b_do)[None, :] * b_u
+    b_dq = tl.sum(b_vdo * b_k, axis=0)
+    b_dk = tl.sum(b_vdo * b_q, axis=0)
+
+    b_dq += tl.load(p_dq, boundary_check=(0, 1))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+
+    b_dk += tl.load(p_dk, boundary_check=(0, 1))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+
+    # tl.store(p_du, b_du.to(p_du.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.jit
 def chunk_rwkv6_fwd_kernel_h(
     k,
     v,
@@ -795,9 +862,9 @@ class ChunkRWKV6Function(torch.autograd.Function):
             qscale = q * scale
             kscale = k * scale
 
-        dq += torch.einsum('bhnv,bhnk,hkv->bhnk', do * v, kscale, u)
-        dq += torch.einsum('bhnv,bhnk,hkv->bhnk', do * v, qscale, u)
-        du = torch.einsum('bhnv,bhnk->hkv', do * v, qscale * k)
+        du = torch.einsum('bhnv,bhnv,bhnk,bhnk->hkv', do, v, qscale, k)
+        dq += torch.einsum('bhnv,bhnv,bhnk,hkv->bhnk', do, v, kscale, u)
+        dk += torch.einsum('bhnv,bhnv,bhnk,hkv->bhnk', do, v, qscale, u)
 
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, None, None, None
 
