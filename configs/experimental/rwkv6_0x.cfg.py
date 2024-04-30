@@ -21,7 +21,9 @@ MAX_SEQUENCE_LENGTH = 1024
 
 
 LOG_PROJECT = 'gptcore_pls'
-LOG_NAME = 'RWKV6.0xFLA_chunk gateLNnoaffineWclamp UZMat Z(z-u+2) k=1-w L8D512H8CM3Adam'
+# LOG_NAME = 'RWKV6.0xFLA_chunk gateLNnoaffineWclamp UZMat Z(z-u+2) k=1-w L8D512H8CM3Adam'
+LOG_NAME = 'RWKV6.0xFLA_chunk UZWmat(kvsum,wdim2x) gateLNnoaffineWclamp L8D512H8CM3Adam'
+
 
 cli.Config(
     seed_everything = 1337,

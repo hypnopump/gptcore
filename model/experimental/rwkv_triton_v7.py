@@ -95,13 +95,13 @@ def fused_recurrent_rwkv6_fwd_kernel(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
-        _w = tl.exp(_w)
+
         _kv = _k[None, :] * _v[:, None]
-        _o = (h + _kv * _u) * _q[None, :]
-        _o = tl.sum(_o, axis=1)
-        h = h * _w
-        h += _kv
+        _o = tl.sum((h + _kv * _u) * _q[None, :], axis=1)
+        h = h * _w + _kv
+
         tl.store(p_o, _o.to(p_o.dtype.element_ty), mask=mask_bv)
+
         p_q += -DK if REVERSE else DK
         p_k += -DK if REVERSE else DK
         p_o += -DV if REVERSE else DV
@@ -205,16 +205,15 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32)
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
-        _kv = _k[None, :] * _v[:, None]
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
         _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
-        _w = tl.exp(_w)
+
+        _kv = _k[None, :] * _v[:, None]
         h_q = h * _do[:, None]
-        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0)
-        _dq *= scale
+        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0) * scale
         _dq_aux = h_q * _q[None, :] * scale
-        h = h * _w
-        h += _kv
+        h = h * _w + _kv
+
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
         tl.store(p_dq_aux, _dq_aux.to(p_dq_aux.dtype.element_ty), mask=mask_kv)
 
@@ -313,9 +312,11 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
+        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
+
         _dkv = _q[:, None] * _do[None, :]
         _kv = _k[:, None] * _v[None, :]
-        d_u += _dkv * _kv
+        # d_u += _dkv * _kv
 
         if i < T - 1:
             dki = tl.load(p_dk_aux, mask=mask_kv, other=0).to(tl.float32)
@@ -332,10 +333,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         d_k = tl.sum(_dkv_hu * _v[None, :], axis=1)
         d_v = tl.sum(_dkv_hu * _k[:, None], axis=0)
 
-        _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
-        _w = tl.exp(_w)
-        d_h *= _w
-        d_h += _dkv
+        d_h = d_h * _w + _dkv
 
         tl.store(p_dk, d_k.to(p_dk.dtype.element_ty), mask=mask_bk)
         tl.store(p_dv, d_v.to(p_dv.dtype.element_ty), mask=mask_bv)

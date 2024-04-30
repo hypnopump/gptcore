@@ -34,37 +34,37 @@ def rwkv6hypno2_recurrent(r_in, k_in, v_in, w_in, u, z, kv_state):
 
 @triton.jit
 def fused_recurrent_rwkv6_fwd_kernel(
-        # B: batch_size, H: n_heads, T: seq_len, D: d_head
-        q,  # query [B, H, L, D_head_K]
-        k,  # key [B, H, L, D_head_K]
-        v,  # value [B, H, L, D_head_V]
-        w,  # log gate [B, H, L, D_head_K]
-        u,  # bonus [H, D_head_K, D_head_V]
-        z,  # filter [H, D_head_K, D_head_V]
-        o,  # output [B, H, L, D_head_V]
-        # initial hidden state initialization [B, H, D_head_K, D_head_V]
-        initial_state,
-        final_state,  # final hidden state [B, H, D_head_K, D_head_V]
+    # B: batch_size, H: n_heads, T: seq_len, D: d_head
+    q,  # query [B, H, L, D_head_K]
+    k,  # key [B, H, L, D_head_K]
+    v,  # value [B, H, L, D_head_V]
+    w,  # log gate [B, H, L, D_head_K]
+    u,  # bonus [H, D_head_K, D_head_V]
+    z,  # filter [H, D_head_K, D_head_V]
+    o,  # output [B, H, L, D_head_V]
+    # initial hidden state initialization [B, H, D_head_K, D_head_V]
+    initial_state,
+    final_state,  # final hidden state [B, H, D_head_K, D_head_V]
 
-        s_qk_h,  # stride size: L * D_head_K
-        s_qk_t,  # stride size: D_head_K
-        s_qk_d,  # stride size: 1
+    s_qk_h,  # stride size: L * D_head_K
+    s_qk_t,  # stride size: D_head_K
+    s_qk_d,  # stride size: 1
 
-        s_vo_h,  # stride size: L * D_head_V
-        s_vo_t,  # stride size: D_head_V
-        s_vo_d,  # stride size: 1
+    s_vo_h,  # stride size: L * D_head_V
+    s_vo_t,  # stride size: D_head_V
+    s_vo_d,  # stride size: 1
 
-        B,  # batch size
-        H,  # n_heads
-        T,  # seq_len
-        scale,  # D_head_K ** -0.5
-        BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-        BV: tl.constexpr,  # BLOCK SIZE along the V dimension
-        DK: tl.constexpr,  # D_head_K
-        DV: tl.constexpr,  # D_head_V
-        USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-        STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-        REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
+    B,  # batch size
+    H,  # n_heads
+    T,  # seq_len
+    scale,  # D_head_K ** -0.5
+    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
+    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
+    DK: tl.constexpr,  # D_head_K
+    DV: tl.constexpr,  # D_head_V
+    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
+    STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
+    REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
 ):
     # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -112,11 +112,9 @@ def fused_recurrent_rwkv6_fwd_kernel(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
-        _w = tl.exp(_w)
         _kv = _k[None, :] * _v[:, None]
-        _o = (h + _kv * _u) * _q[None, :]
-        _o = tl.sum(_o, axis=1)
-        h = h * _w[None, :]
+        _o = tl.sum((h + _kv * _u) * _q[None, :], axis=1)
+        h = h * _w.exp(_w)[None, :]
         # FIXME: hypno: main diff between rwkv6hypno vs hypno2
         h += _kv * _z
         tl.store(p_o, _o.to(p_o.dtype.element_ty), mask=mask_bv)
@@ -216,16 +214,13 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32)
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
-        _kv = _k[None, :] * _v[:, None]
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
-        _w = tl.exp(_w)
         h_q = h * _do[:, None]
-        _dq = tl.sum(h_q * _z + _kv * _u * _do[:, None], axis=0)
-        _dq *= scale
-        _dq_aux = tl.sum(h_q * _z, axis=0) * _q * scale
-        h = h * _w[None, :]
-        h += _kv
+        _kv = _k[None, :] * _v[:, None]
+        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0) * scale
+        _dq_aux = tl.sum(h_q , axis=0) * _q * scale
+        h = h * tl.exp(_w)[None, :] + _kv * _z
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
         tl.store(p_dq_aux, _dq_aux.to(p_dq_aux.dtype.element_ty), mask=mask_bk)
 
@@ -321,7 +316,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _k = tl.load(p_k, mask=mask_bk, other=0).to(tl.float32)
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
-        _dkv = _q[:, None] * _do[None, :]
+        _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
+
         d_hz = d_h * _z
         if i < T - 1:
             dki = tl.load(p_dk_aux, mask=mask_bk, other=0).to(tl.float32)
@@ -329,15 +325,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
             tl.store(p_dk_aux, d_kaux.to(p_dk_aux.dtype.element_ty), mask=mask_bk)
             dki_prev = d_kaux
 
+        _dkv = _q[:, None] * _do[None, :]
         _dkvu = d_hz + _dkv * _u
         d_k = tl.sum(_dkvu * _v[None, :], axis=1)
         d_v = tl.sum(_dkvu * _k[:, None], axis=0)
-
         d_z += d_h * _v[None, :] * _k[:, None]
-        _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
-        _w = tl.exp(_w)
-        d_h *= _w[:, None]
-        d_h += _dkv
+        d_h = d_h * tl.exp(_w)[:, None] + _dkv
 
         tl.store(p_dk, d_k.to(p_dk.dtype.element_ty), mask=mask_bk)
         tl.store(p_dv, d_v.to(p_dv.dtype.element_ty), mask=mask_bv)
