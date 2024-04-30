@@ -209,9 +209,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
 
         _kv = _k[None, :] * _v[:, None]
-        h_q = h * _do[:, None]
-        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0) * scale
-        _dq_aux = h_q * _q[None, :] * scale
+        _dq = tl.sum((h + _kv * _u) * _do[:, None], axis=0) * scale
+        _dq_aux = h * _do[:, None] * _q[None, :] * scale
         h = h * _w + _kv
 
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
@@ -497,6 +496,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         return dq, dk, dv, dw, du, None, None, None, None
 
 
+# if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
 # if scale is None, use d_head_qk ** -0.5 by default. Otherwise specify the scale yourself. e.g. scale = 1.0
 def fused_recurrent_rwkv7hypno(
     r: torch.Tensor,

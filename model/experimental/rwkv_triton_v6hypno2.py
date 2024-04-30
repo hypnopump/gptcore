@@ -112,11 +112,12 @@ def fused_recurrent_rwkv6_fwd_kernel(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _q = tl.load(p_q, mask=mask_bk, other=0).to(tl.float32) * scale
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
+
         _kv = _k[None, :] * _v[:, None]
         _o = tl.sum((h + _kv * _u) * _q[None, :], axis=1)
-        h = h * _w.exp(_w)[None, :]
         # FIXME: hypno: main diff between rwkv6hypno vs hypno2
-        h += _kv * _z
+        h = h * _w[None, :] + _kv * _z
+
         tl.store(p_o, _o.to(p_o.dtype.element_ty), mask=mask_bv)
         p_q += -DK if REVERSE else DK
         p_k += -DK if REVERSE else DK
@@ -216,11 +217,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         _v = tl.load(p_v, mask=mask_bv, other=0).to(tl.float32)
         _do = tl.load(p_do, mask=mask_bv, other=0).to(tl.float32)
         _w = tl.load(p_w, mask=mask_bk, other=0).to(tl.float32)
-        h_q = h * _do[:, None]
+
         _kv = _k[None, :] * _v[:, None]
-        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0) * scale
-        _dq_aux = tl.sum(h_q , axis=0) * _q * scale
-        h = h * tl.exp(_w)[None, :] + _kv * _z
+        _dq = tl.sum((h + _kv * _u) * _do[:, None], axis=0) * scale
+        _dq_aux = tl.sum(h * _do[:, None] , axis=0) * _q * scale
+        h = h * _w[None, :] + _kv * _z
+
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
         tl.store(p_dq_aux, _dq_aux.to(p_dq_aux.dtype.element_ty), mask=mask_bk)
 
@@ -330,7 +332,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         d_k = tl.sum(_dkvu * _v[None, :], axis=1)
         d_v = tl.sum(_dkvu * _k[:, None], axis=0)
         d_z += d_h * _v[None, :] * _k[:, None]
-        d_h = d_h * tl.exp(_w)[:, None] + _dkv
+        d_h = d_h * _w[:, None] + _dkv
 
         tl.store(p_dk, d_k.to(p_dk.dtype.element_ty), mask=mask_bk)
         tl.store(p_dv, d_v.to(p_dv.dtype.element_ty), mask=mask_bv)

@@ -219,9 +219,8 @@ def fused_recurrent_rwkv7_bwd_kernel_dq(
         _w = tl.load(p_w, mask=mask_kv, other=0).to(tl.float32)
 
         _kv = _k[None, :] * _v[:, None]
-        h_q = h * _do[:, None]
-        _dq = tl.sum(h_q + _kv * _u * _do[:, None], axis=0) * scale
-        _dq_aux = h_q * _q[None, :] * scale
+        _dq = tl.sum((h + _kv * _u) * _do[:, None], axis=0) * scale
+        _dq_aux = h * _do[:, None] * _q[None, :] * scale
         h = h * _w + _kv * _z
 
         tl.store(p_dq, _dq.to(p_dq.dtype.element_ty), mask=mask_bk)
@@ -349,7 +348,7 @@ def fused_recurrent_rwkv7_bwd_kernel_dkv(
         # tl.store(p_dk_aux, d_k_inner.to(p_dk_aux.dtype.element_ty), mask=mask_kv)
 
         _dkv = _q[:, None] * _do[None, :]
-        _dkv_hu = d_h + _dkv * _u
+        _dkv_hu = d_hz + _dkv * _u
         d_k = tl.sum(_dkv_hu * _v[None, :], axis=1)
         d_v = tl.sum(_dkv_hu * _k[:, None], axis=0)
         d_z += d_h * _kv

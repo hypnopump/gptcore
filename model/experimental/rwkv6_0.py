@@ -191,8 +191,8 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
 
         args = RWKVConfig(hparams)
         self.umat = True   # True
-        self.zmat = True  # True
-        self.wmat = True   # True
+        self.zmat = False  # True
+        self.wmat = False   # True
         self.k_one_minus_w = False
 
         self.args = args
@@ -227,7 +227,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
             self.tm_w2 = nn.Parameter(torch.zeros(5, TIME_MIX_EXTRA_DIM, args.n_embd))
             W_MIX_EXTRA_DIM = 64*2
             self.td_w1 = nn.Parameter(torch.empty(args.n_embd, W_MIX_EXTRA_DIM).uniform_(-0.01, 0.01))
-            self.td_w2 = nn.Parameter(torch.zeros(W_MIX_EXTRA_DIM, args.n_embd*2))
+            self.td_w2 = nn.Parameter(torch.zeros(W_MIX_EXTRA_DIM, args.n_embd))
 
             # fancy time_decay
             k_dim_att = args.n_kv_head * self.k_head_size
