@@ -97,10 +97,10 @@ def post_process_grad(
     b_do = tl.load(p_do, boundary_check=(0, 1))
     b_u = tl.load(p_u, boundary_check=(0,))
 
-    b_vdo = tl.sum(b_v * b_do, axis=1)
-    b_du = b_vdo[:, None] * b_k * b_q * scale
-    b_dq = b_vdo[:, None] * b_k * b_u[None, :] * scale
-    b_dk = b_vdo[:, None] * b_q * b_u[None, :] * scale
+    b_vdo = tl.sum(b_v * b_do, axis=1) * scale
+    b_du = b_vdo[:, None] * b_k * b_q
+    b_dq = b_vdo[:, None] * b_k * b_u[None, :]
+    b_dk = b_vdo[:, None] * b_q * b_u[None, :]
 
     b_dq += tl.load(p_dq, boundary_check=(0, 1))
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
@@ -120,6 +120,7 @@ def post_process_grad_umat(
     do,
     dk,
     dq,
+    du,
     scale,
     s_k_h,
     s_k_t,
@@ -127,6 +128,7 @@ def post_process_grad_umat(
     s_v_h,
     s_v_t,
     s_v_d,
+    s_u_h,
     H,
     T: tl.constexpr,
     BT: tl.constexpr,
@@ -156,26 +158,29 @@ def post_process_grad_umat(
     # block_shape – The shape of the block
     # order – The order of the original data format
     p_u = tl.make_block_ptr(u + i_h * K * V, (K, V), (K, 1), (0, 0), (BK, BV), (1, 0))
+    p_du = tl.make_block_ptr(du + i_bh * s_u_h, (K, V), (K, 1), (0, 0), (BK, BV), (1, 0))
 
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
     b_v = tl.load(p_v, boundary_check=(0, 1))
     b_do = tl.load(p_do, boundary_check=(0, 1))
-    b_u = tl.load(p_u, boundary_check=(0,))
+    b_u = tl.load(p_u, boundary_check=(0,1))
 
     # b_vdo = tl.sum(b_v * b_do, axis=1)
     # b_du = b_vdo[:, None] * b_k * b_q * scale
-    b_vdo = (scale * b_v * b_do)[None, :] * b_u
-    b_dq = tl.sum(b_vdo * b_k, axis=0)
-    b_dk = tl.sum(b_vdo * b_q, axis=0)
+    b_vdo = (scale * b_v * b_do)[:, None]
+    # b_du = tl.sum(b_vdo * b_q[:, :, None] * b_k[:, :, None], axis=0)
+    b_du = tl.sum(b_vdo * b_q[:, :, None] * b_k[:, :, None], axis=0)
+    b_dq = tl.sum(b_vdo * b_u[None] * b_k[:, :, None], axis=2) + tl.load(p_dq, boundary_check=(0, 1))
+    b_dk = tl.sum(b_vdo * b_u[None] * b_q[:, :, None], axis=2) + tl.load(p_dk, boundary_check=(0, 1))
 
-    b_dq += tl.load(p_dq, boundary_check=(0, 1))
+    # b_dq += tl.load(p_dq, boundary_check=(0, 1))
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
-    b_dk += tl.load(p_dk, boundary_check=(0, 1))
+    # b_dk += tl.load(p_dk, boundary_check=(0, 1))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
-    # tl.store(p_du, b_du.to(p_du.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_du, b_du.to(p_du.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.jit
@@ -696,10 +701,10 @@ class ChunkRWKV6Function(torch.autograd.Function):
             ht=final_state if final_state is not None else None
         )
         A = q.new_zeros(NK, B, H, T, BT)
-        u_ = u.new_zeros(H, K, V)
+        # u_ = u.new_zeros(H, K, V)
         grid = (NK, NT * NC * NC, B * H)
         chunk_rwkv6_fwd_kernel_intra[grid](
-            q, k, g, gs, u_, A,
+            q, k, g, gs, u, A,
             k.stride(1), k.stride(2), k.stride(3),
             scale,
             H=H, T=T, K=K, BT=BT, BC=BC, BK=BK, NC=NC, DK=K,
@@ -721,7 +726,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
             num_stages=num_stages
         )
         # FIXME: ignore U for now and just build extra output (price paid)
-        o = o + torch.einsum('bhic,hcd,bhic,bhid->bhid', q, u, k, v)
+        # o = o + torch.einsum('bhic,hcd,bhic,bhid->bhid', q, u, k, v)
 
         # if checkpoint_level >= 1:
         #     del g
@@ -844,27 +849,27 @@ class ChunkRWKV6Function(torch.autograd.Function):
         # # du = ((do * v).sum(-1)[..., None] * k * q * scale).sum(-2).to(u)
         # # dq += ((do * v).sum(-1)[..., None] * k * scale * u[:, :, None, :])
         # # dk += ((do * v).sum(-1)[..., None] * q * scale * u[:, :, None, :])
-        # BT = 64
-        # grid = (triton.cdiv(T, BT), B * H)
-        # du = torch.empty_like(g, dtype=torch.float)
-        # post_process_grad[grid](
-        #     q, k, v, u, do, dk, dq, du, scale,
-        #     q.stride(1), q.stride(2), q.stride(3),
-        #     v.stride(1), v.stride(2), v.stride(3), H=H,
-        #     T=T, BT=BT, K=K, V=V, BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
-        #     num_warps=4
-        # )
-        # du = du.sum([0, 2])
+        BT = 1 # 64
+        grid = (triton.cdiv(T, BT), B * H)
+        du = torch.empty_like(g, dtype=torch.float)
+        post_process_grad[grid](
+            q, k, v, u, do, dk, dq, du, scale,
+            q.stride(1), q.stride(2), q.stride(3),
+            v.stride(1), v.stride(2), v.stride(3), H=H,
+            T=T, BT=BT, K=K, V=V, BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
+            num_warps=4
+        )
+        du = du.sum([0, 2])
 
         # only multiply if differen
-        qscale, kscale = q, k
-        if abs(1 - scale) > 1e-5:
-            qscale = q * scale
-            kscale = k * scale
+        # qscale, kscale = q, k
+        # if abs(1 - scale) > 1e-5:
+        #     qscale = q * scale
+        #     kscale = k * scale
 
-        du = torch.einsum('bhnv,bhnv,bhnk,bhnk->hkv', do, v, qscale, k)
-        dq += torch.einsum('bhnv,bhnv,bhnk,hkv->bhnk', do, v, kscale, u)
-        dk += torch.einsum('bhnv,bhnv,bhnk,hkv->bhnk', do, v, qscale, u)
+        # du = torch.einsum('bhnv,bhnv,bhnk,bhnk->hkv', do, v, qscale, k)
+        # dq += torch.einsum('bhnv,bhnv,bhnk,hkv->bhnk', do, v, kscale, u)
+        # dk += torch.einsum('bhnv,bhnv,bhnk,hkv->bhnk', do, v, qscale, u)
 
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, None, None, None
 

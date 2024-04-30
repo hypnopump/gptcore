@@ -4,6 +4,7 @@
 
 from typing import Tuple
 
+from math import ceil
 import torch
 import triton
 import triton.language as tl
@@ -243,7 +244,7 @@ class ChunkedFwRecurrentBwRWKV6PlusFunction(torch.autograd.Function):
         # # du = ((do * v).sum(-1)[..., None] * k * q * scale).sum(-2).to(u)
         # # dq += ((do * v).sum(-1)[..., None] * k * scale * u[:, :, None, :])
         # # dk += ((do * v).sum(-1)[..., None] * q * scale * u[:, :, None, :])
-        BT = 64
+        BT = 1 # 64
         grid = (triton.cdiv(T, BT), B * H)
         # du = torch.empty_like(g, dtype=torch.float)
         # post_process_grad[grid](
@@ -253,28 +254,29 @@ class ChunkedFwRecurrentBwRWKV6PlusFunction(torch.autograd.Function):
         #     T=T, BT=BT, K=K, V=V, BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
         #     num_warps=4
         # )
-        du = r.new_zeros().sum([0, 2])
+        du = q.new_zeros(B, H, ceil(T/BT), K, V)
         post_process_grad_umat[grid](
-            q, k, v, u, do, dk, dq, scale,
+            q, k, v, u, do, dk, dq, du, scale,
             q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3), H=H,
+            v.stride(1), v.stride(2), v.stride(3), u.stride(1),  H=H,
             T=T, BT=BT, K=K, V=V, BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
             num_warps=4
         )
+        du = du.sum((0, 2), dtype=u.dtype)
 
 
-        # doing it in torch looses speed advantage compared to sequential kernel (lol)
-        # # only multiply if differen
-        qscale = q
-        # q, kscale = q, k
-        if abs(1 - scale) > 1e-5:
-            qscale = q * scale
-            # kscale = k * scale
-        #
-        # dov = do*v
-        du = torch.einsum('bhnv,bhnv,bhnk,bhnk->hkv', do, v, qscale, k)
-        # dq += torch.einsum('bhnv,bhnk,hkv->bhnk', dov, kscale, u)
-        # dk += torch.einsum('bhnv,bhnk,hkv->bhnk', dov, qscale, u)
+        # # # doing it in torch looses speed advantage compared to sequential kernel (lol)
+        # # # # only multiply if differen
+        # qscale = q
+        # # # q, kscale = q, k
+        # if abs(1 - scale) > 1e-5:
+        #     qscale = q * scale
+        #     # kscale = k * scale
+        # # #
+        # # # dov = do*v
+        # du = torch.einsum('bhnv,bhnv,bhnk,bhnk->hkv', do, v, qscale, k)
+        # # # dq += torch.einsum('bhnv,bhnk,hkv->bhnk', dov, kscale, u)
+        # # # dk += torch.einsum('bhnv,bhnk,hkv->bhnk', dov, qscale, u)
 
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, None, None, None
 

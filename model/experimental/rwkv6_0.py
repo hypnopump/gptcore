@@ -40,6 +40,7 @@ from .rwkv_triton_v7wuz import fused_recurrent_rwkv7hypno2
 # base RWKV6. chunked is significantly faster (80ktok/s vs 50ktok/s on uncompiled L8D512H8; seq_len=1024; A100)
 from fla.ops.rwkv6.recurrent_fuse import fused_recurrent_rwkv6
 from fla.ops.rwkv6.chunk import chunk_rwkv6
+from .rwkv_triton_chunked import chunk_rwkv6
 
 
 # Compiled torch functions
@@ -193,7 +194,7 @@ class RWKV6_0_AttentionSubLayer(model.core.TransformerLayerPart, model.interface
         hparams, layer_id = self.hparams, self.layer_id
 
         args = RWKVConfig(hparams)
-        self.umat = True   # True
+        self.umat = False   # True
         self.zmat = False  # True
         self.wmat = False   # True
         self.k_one_minus_w = True
